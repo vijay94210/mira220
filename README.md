@@ -66,3 +66,47 @@ channel clipping fractions.
 See [docs/pipeline.md](docs/pipeline.md) for the correction equations and
 [docs/experiments.md](docs/experiments.md) for the historical experiment record.
 
+## Compare Mira NDVI With Gold-Camera TIFFs
+
+Place calibrated three-channel Red/Green/NIR gold-camera TIFFs containing
+ArUco marker `830` under the gitignored `data/gold/` directory. Mira inputs are
+processed output directories containing `ndvi.tiff` and `rgn_reflectance.tiff`.
+
+Compare one pair:
+
+```powershell
+python -m mira220 compare "results\survey-001\capture-name" "data\gold\gold-001.tif"
+```
+
+Compare every discovered Mira output with every gold TIFF and rank the
+candidates for each Mira capture:
+
+```powershell
+python -m mira220 compare-all --mira-root results --gold-dir data/gold
+```
+
+Results are written under `results/comparisons/`. The top-ranked pair is only a
+candidate; visually confirm its `alignment_overlay.png` before treating its
+regression metrics as authoritative. Regression plots and primary metrics use
+valid-pixel-weighted 16x16 NDVI block averages; reports also retain pixel-level
+metrics under `pixel_metrics`.
+
+## Apply The Scene-Trained Channel Correction
+
+`config/models/scene_reference_v1.yaml` contains an optional second-stage
+Red/NIR correction trained from the aligned June 4 dataset. It is scene-specific
+and does not replace the general `flat_patch_v1` model.
+
+Apply it to existing reflectance outputs without rerunning openRGB-IR:
+
+```powershell
+python -m mira220 recalibrate "results\survey-001" `
+  --output-root "results\survey-001-scene-reference-v1"
+```
+
+For future RAW processing of the same scene:
+
+```powershell
+python -m mira220 process --model config/models/scene_reference_v1.yaml
+```
+

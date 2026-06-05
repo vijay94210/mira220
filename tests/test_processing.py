@@ -2,7 +2,7 @@ from pathlib import Path
 
 import numpy as np
 
-from mira220.correction import apply_model, load_yaml
+from mira220.correction import apply_model, apply_scene_correction, load_yaml
 from mira220.imaging import compute_ndvi, ndvi_false_color
 
 
@@ -28,4 +28,25 @@ def test_ndvi_and_false_color() -> None:
     colors = ndvi_false_color(np.array([[-0.2, 0.7]], np.float32), -0.2, 0.7)
     assert colors[0, 0, 0] > colors[0, 0, 1]
     assert colors[0, 1, 1] > colors[0, 1, 0]
+
+
+def test_scene_correction_uses_channel_level_features() -> None:
+    config = {
+        "red_coefficients": [1, 0, 0, 0, 0, 0],
+        "ir_coefficients": [0, 1, 0, 0, 0, 0],
+    }
+    red = np.array([[0.2, 0.4]], np.float32)
+    ir = np.array([[0.6, 0.8]], np.float32)
+    corrected_red, corrected_ir = apply_scene_correction(red, ir, config)
+    np.testing.assert_allclose(corrected_red, red)
+    np.testing.assert_allclose(corrected_ir, ir)
+
+
+def test_scene_reference_model_applies_without_clipping_sample() -> None:
+    model = load_yaml(Path("config/models/scene_reference_v1.yaml"))
+    rgb = np.array([[[0.3, 0.4, 0.5]]], dtype=np.float32)
+    ir = np.array([[0.5]], dtype=np.float32)
+    red, _, corrected_ir = apply_model(rgb, ir, model)
+    assert 0 < red[0, 0] < 1
+    assert 0 < corrected_ir[0, 0] < 1
 

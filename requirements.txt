@@ -2,4 +2,5 @@ numpy>=2.0
 opencv-contrib-python>=4.10
 PyYAML>=6.0
 tifffile>=2024.0
+matplotlib>=3.9
 
