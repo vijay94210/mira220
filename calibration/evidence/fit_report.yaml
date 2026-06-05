@@ -1,0 +1,81 @@
+name: flat_patch_v1
+description: Post-demosaic quadratic R/G/IR correction anchored to flat-spectrum patches.
+preprocessing:
+  irc_cut: 0.0
+  awb: false
+  ccm: false
+  sensor_bit_depth: 12
+provenance:
+  mira_raw: C:\Users\jayal\git\mira220\data\raw\2026-06-04_19_48_23.raw
+  gold_tiff: C:\Users\jayal\OneDrive\unearthed\mira220\20260604\Survey3N_RGN\tiff16\Reflectance_Calibrated_Images\2026_0604_194919_003.tif
+  gold_channels:
+    red: 0
+    green: 1
+    ir: 2
+display:
+  ndvi_min: -0.2
+  ndvi_max: 0.7
+patch_targets:
+- name: P1
+  reflectance: 0.7406067848205566
+- name: P2
+  reflectance: 0.6783372759819031
+- name: P3
+  reflectance: 0.31364917755126953
+- name: P4
+  reflectance: 0.26429644227027893
+correction:
+  red:
+    features:
+    - raw_red
+    - raw_ir
+    - raw_ir_squared
+    - constant
+    coefficients:
+    - 2.7299982282575046
+    - -5.59900323463363
+    - 3.921675195593025
+    - 0.3154758839791634
+  green:
+    features:
+    - raw_green
+    - raw_ir
+    - raw_ir_squared
+    - constant
+    coefficients:
+    - 0.16808826282084355
+    - 0.20669932657268691
+    - 0.3978048273749154
+    - 0.12400772921253972
+  ir:
+    features:
+    - raw_ir
+    - raw_ir_squared
+    - constant
+    coefficients:
+    - 0.650101385785563
+    - 0.027597996969286637
+    - 0.15592705129892803
+validation:
+  patch_results:
+  - name: P1
+    red: 0.7407805323600769
+    green: 0.7406499981880188
+    ir: 0.7353065013885498
+    ndvi: -0.003708471884041647
+  - name: P2
+    red: 0.6853399872779846
+    green: 0.6783765554428101
+    ir: 0.6850287318229675
+    ndvi: -0.0002271324670113791
+  - name: P3
+    red: 0.31463444232940674
+    green: 0.3135561943054199
+    ir: 0.3036981225013733
+    ndvi: -0.01768676398963786
+  - name: P4
+    red: 0.26139944791793823
+    green: 0.26435011625289917
+    ir: 0.27285632491111755
+    ndvi: 0.021444514278240394
+  max_abs_patch_ndvi: 0.021444514278240394

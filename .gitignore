@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+data/raw/*
+!data/raw/.gitkeep
+results/*
+!results/.gitkeep
+
+*.tif
+*.tiff
+_work/
+

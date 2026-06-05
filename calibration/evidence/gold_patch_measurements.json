@@ -1,0 +1,38 @@
+[
+  {
+    "name": "P1",
+    "position": "top-left",
+    "gold_median_R": 0.7285420298576355,
+    "gold_median_G": 0.7370107769966125,
+    "gold_median_IR": 0.7562676668167114,
+    "gold_NDVI_from_medians": 0.01867285557091236,
+    "flat_reflectance_mean_R_G_IR": 0.7406067848205566
+  },
+  {
+    "name": "P2",
+    "position": "top-right",
+    "gold_median_R": 0.656557559967041,
+    "gold_median_G": 0.6664835810661316,
+    "gold_median_IR": 0.7119706869125366,
+    "gold_NDVI_from_medians": 0.04049103707075119,
+    "flat_reflectance_mean_R_G_IR": 0.6783372759819031
+  },
+  {
+    "name": "P3",
+    "position": "bottom-left",
+    "gold_median_R": 0.29359883069992065,
+    "gold_median_G": 0.2889753580093384,
+    "gold_median_IR": 0.35837337374687195,
+    "gold_NDVI_from_medians": 0.09935169667005539,
+    "flat_reflectance_mean_R_G_IR": 0.31364917755126953
+  },
+  {
+    "name": "P4",
+    "position": "bottom-right",
+    "gold_median_R": 0.24547187983989716,
+    "gold_median_G": 0.2514534294605255,
+    "gold_median_IR": 0.29596400260925293,
+    "gold_NDVI_from_medians": 0.09325595945119858,
+    "flat_reflectance_mean_R_G_IR": 0.26429644227027893
+  }
+]

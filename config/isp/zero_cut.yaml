@@ -1,0 +1,27 @@
+module_enable_status:
+  dpc: false
+  blc: true
+  aaf: false
+  irc: true
+  awb: false
+  cnf: false
+  rgbir: true
+  cfa: true
+  ccm: false
+  gac: false
+  csc: false
+  nlm: false
+  bnf: false
+  ceh: false
+  eeh: false
+  fcs: false
+  hsc: false
+  bcc: false
+  jbf: false
+  scl: false
+hardware: {raw_width: 1600, raw_height: 1400, raw_bit_depth: 12, bayer_pattern: bggr}
+blc: {bl_r: -10, bl_gr: 0, bl_gb: 0, bl_b: 0, alpha: 0, beta: 10}
+irc: {clip_coef: 1.3, cut_coef: 0.0}
+rgbir: null
+cfa: {mode: malvar}
+
