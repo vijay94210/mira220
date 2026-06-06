@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -25,10 +26,36 @@ from .openrgbir import is_compatible_raw, run_openrgbir
 from .session import adjust_session, summarize_clipping
 
 
+PROCESSED_SENTINELS = (
+    "ndvi.tiff",
+    "ndvi_gray.png",
+    "ndvi_false_color.png",
+    "rgb_preview.png",
+    "rgn_preview.png",
+    "rgn_reflectance.tiff",
+)
+RAW_TIMESTAMP_RE = re.compile(r"(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})_(?P<hour>\d{2})_(?P<minute>\d{2})_(?P<second>\d{2})")
+
+
 def _add_shared_paths(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--openrgbir-repo", type=Path, default=DEFAULT_OPENRGBIR_REPO)
     parser.add_argument("--isp-config", type=Path, default=DEFAULT_ISP_CONFIG_PATH)
     parser.add_argument("--target-config", type=Path, default=DEFAULT_TARGET_PATH)
+
+
+def _capture_output_name(raw_path: Path) -> str:
+    match = RAW_TIMESTAMP_RE.search(raw_path.stem)
+    if match is None:
+        return raw_path.stem
+    parts = match.groupdict()
+    return (
+        f"{parts['year']}-{parts['day']}-{parts['month']}_"
+        f"{parts['hour']}_{parts['minute']}_{parts['second']}"
+    )
+
+
+def _is_processed_output(output_dir: Path) -> bool:
+    return all((output_dir / name).is_file() for name in PROCESSED_SENTINELS)
 
 
 def _fit(args: argparse.Namespace) -> int:
@@ -81,7 +108,17 @@ def _process_run(
             print(f"Skipping incompatible RAW: {raw_path.name}")
             continue
         relative_parent = raw_path.parent.relative_to(raw_dir)
-        output_dir = run_dir / relative_parent / raw_path.stem
+        output_dir = run_dir / relative_parent / _capture_output_name(raw_path)
+        if _is_processed_output(output_dir):
+            skipped.append(
+                {
+                    "path": str(raw_path.resolve()),
+                    "output_directory": str(output_dir.resolve()),
+                    "reason": "already processed",
+                }
+            )
+            print(f"Skipping already processed RAW: {raw_path.name} -> {output_dir}")
+            continue
         raw_rgb, raw_ir = run_openrgbir(
             raw_path,
             output_dir,

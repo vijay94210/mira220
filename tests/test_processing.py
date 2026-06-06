@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import tifffile
 
+from mira220.cli import PROCESSED_SENTINELS, _capture_output_name, _is_processed_output
 from mira220.correction import apply_model, apply_scene_correction, load_yaml
 from mira220.imaging import compute_ndvi, ndvi_false_color, save_reflectance_products
 
@@ -50,6 +51,22 @@ def test_reflectance_products_include_ndvi_and_previews(tmp_path: Path) -> None:
     ):
         assert (tmp_path / name).is_file()
     assert tifffile.imread(tmp_path / "ndvi.tiff").dtype == np.float32
+
+
+def test_raw_capture_output_name_uses_trimmed_timestamp() -> None:
+    raw = Path("1600x1400_Bit12_RGB-IR_RGB-IRMod(GRIG)_2026-05-02_19_36_16.raw")
+    assert _capture_output_name(raw) == "2026-02-05_19_36_16"
+
+
+def test_raw_capture_output_name_falls_back_to_stem() -> None:
+    assert _capture_output_name(Path("capture.raw")) == "capture"
+
+
+def test_processed_output_requires_expected_artifacts(tmp_path: Path) -> None:
+    assert not _is_processed_output(tmp_path)
+    for name in PROCESSED_SENTINELS:
+        (tmp_path / name).write_bytes(b"x")
+    assert _is_processed_output(tmp_path)
 
 
 def test_scene_correction_uses_channel_level_features() -> None:
