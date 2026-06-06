@@ -1,0 +1,11 @@
+name: aruco830_mapir_reference_v1
+description: Fixed per-channel patch reflectances measured from the original calibrated Mapir target capture.
+provenance:
+  source: calibration/evidence/gold_patch_measurements.json
+  mapir_tiff: 2026_0604_194919_003.tif
+channels: [red, green, ir]
+patches:
+  - {name: P1, red: 0.7285420298576355, green: 0.7370107769966125, ir: 0.7562676668167114}
+  - {name: P2, red: 0.6565575599670410, green: 0.6664835810661316, ir: 0.7119706869125366}
+  - {name: P3, red: 0.2935988306999207, green: 0.2889753580093384, ir: 0.3583733737468720}
+  - {name: P4, red: 0.2454718798398972, green: 0.2514534294605255, ir: 0.2959640026092529}

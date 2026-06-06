@@ -1,9 +1,10 @@
 from pathlib import Path
 
 import numpy as np
+import tifffile
 
 from mira220.correction import apply_model, apply_scene_correction, load_yaml
-from mira220.imaging import compute_ndvi, ndvi_false_color
+from mira220.imaging import compute_ndvi, ndvi_false_color, save_reflectance_products
 
 
 def test_default_model_loads() -> None:
@@ -28,6 +29,27 @@ def test_ndvi_and_false_color() -> None:
     colors = ndvi_false_color(np.array([[-0.2, 0.7]], np.float32), -0.2, 0.7)
     assert colors[0, 0, 0] > colors[0, 0, 1]
     assert colors[0, 1, 1] > colors[0, 1, 0]
+
+
+def test_reflectance_products_include_ndvi_and_previews(tmp_path: Path) -> None:
+    red = np.full((4, 4), 0.2, np.float32)
+    green = np.full((4, 4), 0.3, np.float32)
+    ir = np.full((4, 4), 0.8, np.float32)
+    rgb = np.dstack([red, green, ir])
+    save_reflectance_products(tmp_path, red, green, ir, -0.2, 0.7, rgb=rgb)
+    for name in (
+        "red_reflectance.tiff",
+        "green_reflectance.tiff",
+        "ir_reflectance.tiff",
+        "rgn_reflectance.tiff",
+        "ndvi.tiff",
+        "ndvi_gray.png",
+        "ndvi_false_color.png",
+        "rgn_preview.png",
+        "rgb_preview.png",
+    ):
+        assert (tmp_path / name).is_file()
+    assert tifffile.imread(tmp_path / "ndvi.tiff").dtype == np.float32
 
 
 def test_scene_correction_uses_channel_level_features() -> None:
