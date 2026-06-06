@@ -57,6 +57,7 @@ def save_reflectance_products(
     ir: np.ndarray,
     ndvi_min: float,
     ndvi_max: float,
+    rgb: np.ndarray | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     rgn = np.dstack([red, green, ir]).astype(np.float32)
@@ -66,6 +67,8 @@ def save_reflectance_products(
     tifffile.imwrite(output_dir / "ir_reflectance.tiff", ir.astype(np.float32))
     tifffile.imwrite(output_dir / "rgn_reflectance.tiff", rgn)
     tifffile.imwrite(output_dir / "ndvi.tiff", ndvi.astype(np.float32))
+    if rgb is not None:
+        write_rgb_preview(output_dir / "rgb_preview.png", np.asarray(rgb, np.float32))
     write_rgb_preview(output_dir / "rgn_preview.png", rgn)
     cv2.imwrite(
         str(output_dir / "ndvi_false_color.png"),

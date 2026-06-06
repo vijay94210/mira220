@@ -4,6 +4,10 @@ __pycache__/
 
 data/raw/*
 !data/raw/.gitkeep
+data/gold/*
+!data/gold/.gitkeep
+data/sessions/*
+!data/sessions/.gitkeep
 results/*
 !results/.gitkeep
 

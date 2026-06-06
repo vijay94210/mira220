@@ -1,0 +1,36 @@
+name: scene_reference_v1
+description: Flat-patch correction followed by channel-level calibration against the aligned June 4 gold scene.
+preprocessing:
+  irc_cut: 0.0
+  awb: false
+  ccm: false
+  sensor_bit_depth: 12
+provenance:
+  base_model: config/models/flat_patch_v1.yaml
+  training_mira_run: results/survey-001
+  training_gold_tiff: data/gold/2026_0604_194919_003.tif
+  training_method: ridge regression on aligned 16x16 block averages from four Mira captures
+  validation_method: leave-one-Mira-capture-out
+  applicability: scene-specific
+display:
+  ndvi_min: -0.2
+  ndvi_max: 0.7
+correction:
+  red:
+    features: [raw_red, raw_ir, raw_ir_squared, constant]
+    coefficients: [2.7299981117248535, -5.599003314971924, 3.921675205230713, 0.3154758810997009]
+  green:
+    features: [raw_green, raw_ir, raw_ir_squared, constant]
+    coefficients: [0.16808825731277466, 0.20669932663440704, 0.3978048264980316, 0.12400773167610168]
+  ir:
+    features: [raw_ir, raw_ir_squared, constant]
+    coefficients: [0.650101363658905, 0.027597997337579727, 0.15592704713344574]
+scene_correction:
+  features: [red, ir, red_squared, ir_squared, red_ir, constant]
+  red_coefficients: [-0.68176794, 1.89970319, -1.06311970, -3.34734468, 4.25815120, -0.10796675]
+  ir_coefficients: [-0.06126671, 2.08372739, 0.32274787, 0.21434925, -1.48613163, -0.21881987]
+validation:
+  block_size: 16
+  leave_one_capture_out:
+    pearson_correlation_range: [0.8809, 0.9279]
+    rmse_range: [0.0743, 0.0938]

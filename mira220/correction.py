@@ -16,6 +16,32 @@ def write_yaml(path: Path, value: dict) -> None:
     path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
 
 
+def apply_scene_correction(
+    red: np.ndarray,
+    ir: np.ndarray,
+    scene_config: dict,
+) -> tuple[np.ndarray, np.ndarray]:
+    features = np.stack(
+        [
+            red,
+            ir,
+            np.square(red),
+            np.square(ir),
+            red * ir,
+            np.ones_like(red),
+        ],
+        axis=-1,
+    )
+    red_coefficients = np.asarray(scene_config["red_coefficients"], dtype=np.float32)
+    ir_coefficients = np.asarray(scene_config["ir_coefficients"], dtype=np.float32)
+    if red_coefficients.shape != (6,) or ir_coefficients.shape != (6,):
+        raise ValueError("Scene correction requires six red and six IR coefficients.")
+    return (
+        np.clip(features @ red_coefficients, 0.0, 1.0),
+        np.clip(features @ ir_coefficients, 0.0, 1.0),
+    )
+
+
 def apply_model(rgb: np.ndarray, ir: np.ndarray, model_config: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     model = model_config["correction"]
     red_coefficients = np.asarray(model["red"]["coefficients"], dtype=np.float32)
@@ -42,5 +68,7 @@ def apply_model(rgb: np.ndarray, ir: np.ndarray, model_config: dict) -> tuple[np
         0.0,
         1.0,
     )
+    if "scene_correction" in model_config:
+        red, calibrated_ir = apply_scene_correction(red, calibrated_ir, model_config["scene_correction"])
     return red, green, calibrated_ir
 
