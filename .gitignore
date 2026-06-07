@@ -1,16 +1,27 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.tmp/
+.pytest-tmp/
+pytest-tmp/
+pytest-cache/
 
 data/raw/*
 !data/raw/.gitkeep
 data/gold/*
 !data/gold/.gitkeep
+data/calibration/*
+!data/calibration/.gitkeep
+data/flatfield/*
+!data/flatfield/.gitkeep
 data/sessions/*
 !data/sessions/.gitkeep
 results/*
 !results/.gitkeep
+outputs/
 
+*.raw
+*.RAW
 *.tif
 *.tiff
 _work/

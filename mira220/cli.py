@@ -11,6 +11,7 @@ import numpy as np
 import tifffile
 
 from . import (
+    DEFAULT_DATA_ROOT,
     DEFAULT_ISP_CONFIG_PATH,
     DEFAULT_MODEL_PATH,
     DEFAULT_OPENRGBIR_REPO,
@@ -343,7 +344,7 @@ def _variant_summary(name: str, comparison: dict, variant_root: Path, processing
 def _validate_session(args: argparse.Namespace) -> int:
     raw_dir = args.session_dir / "mira" / "raw"
     mapir_dir = args.session_dir / "mapir" / "tiff"
-    output_root = args.output_root or ROOT / "results" / "sessions" / args.session_dir.name
+    output_root = args.output_root or DEFAULT_DATA_ROOT / "outputs" / "sessions" / args.session_dir.name
     target = load_yaml(args.target_config)
     reference = load_yaml(args.target_reference)
     variants = {
@@ -421,9 +422,9 @@ def build_parser() -> argparse.ArgumentParser:
     fit.set_defaults(handler=_fit)
 
     process = subparsers.add_parser("process", help="Batch-process Mira220 RAW files.")
-    process.add_argument("raw_dir", type=Path, nargs="?", default=ROOT / "data" / "raw")
+    process.add_argument("raw_dir", type=Path, nargs="?", default=DEFAULT_DATA_ROOT / "raw")
     process.add_argument("--model", type=Path, default=DEFAULT_MODEL_PATH)
-    process.add_argument("--results-dir", type=Path, default=ROOT / "results")
+    process.add_argument("--results-dir", type=Path, default=DEFAULT_DATA_ROOT / "outputs" / "runs")
     process.add_argument("--run-id")
     process.add_argument("--recursive", action="store_true")
     process.add_argument("--keep-intermediates", action="store_true")
@@ -433,9 +434,9 @@ def build_parser() -> argparse.ArgumentParser:
     process_session = subparsers.add_parser(
         "process-session", help="Process RAWs and optionally write a target affine-adjusted variant."
     )
-    process_session.add_argument("raw_dir", type=Path, nargs="?", default=ROOT / "data" / "raw")
+    process_session.add_argument("raw_dir", type=Path, nargs="?", default=DEFAULT_DATA_ROOT / "raw")
     process_session.add_argument("--model", type=Path, default=DEFAULT_MODEL_PATH)
-    process_session.add_argument("--results-dir", type=Path, default=ROOT / "results")
+    process_session.add_argument("--results-dir", type=Path, default=DEFAULT_DATA_ROOT / "outputs" / "runs")
     process_session.add_argument("--run-id")
     process_session.add_argument("--recursive", action="store_true")
     process_session.add_argument("--keep-intermediates", action="store_true")
@@ -447,20 +448,20 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("image_or_run", type=Path)
     inspect.add_argument("--model", type=Path, default=DEFAULT_MODEL_PATH)
     inspect.add_argument("--target-config", type=Path, default=DEFAULT_TARGET_PATH)
-    inspect.add_argument("--report", type=Path, default=ROOT / "results" / "inspection.json")
+    inspect.add_argument("--report", type=Path, default=DEFAULT_DATA_ROOT / "outputs" / "inspection.json")
     inspect.set_defaults(handler=_inspect)
 
     compare = subparsers.add_parser("compare", help="Compare one Mira output with one gold TIFF.")
     compare.add_argument("mira_output", type=Path)
     compare.add_argument("gold_tiff", type=Path)
-    compare.add_argument("--output-dir", type=Path, default=ROOT / "results" / "comparisons" / "single")
+    compare.add_argument("--output-dir", type=Path, default=DEFAULT_DATA_ROOT / "outputs" / "comparisons" / "single")
     compare.add_argument("--target-config", type=Path, default=DEFAULT_TARGET_PATH)
     compare.set_defaults(handler=_compare)
 
     compare_batch = subparsers.add_parser("compare-all", help="Compare every Mira output with every gold TIFF.")
-    compare_batch.add_argument("--mira-root", type=Path, default=ROOT / "results")
-    compare_batch.add_argument("--gold-dir", type=Path, default=ROOT / "data" / "gold")
-    compare_batch.add_argument("--output-dir", type=Path, default=ROOT / "results" / "comparisons")
+    compare_batch.add_argument("--mira-root", type=Path, default=DEFAULT_DATA_ROOT / "outputs" / "runs")
+    compare_batch.add_argument("--gold-dir", type=Path, default=DEFAULT_DATA_ROOT / "gold")
+    compare_batch.add_argument("--output-dir", type=Path, default=DEFAULT_DATA_ROOT / "outputs" / "comparisons")
     compare_batch.add_argument("--target-config", type=Path, default=DEFAULT_TARGET_PATH)
     compare_batch.set_defaults(handler=_compare_all)
 
@@ -469,7 +470,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     recalibrate.add_argument("input_root", type=Path)
     recalibrate.add_argument("--model", type=Path, default=ROOT / "config" / "models" / "scene_reference_v1.yaml")
-    recalibrate.add_argument("--output-root", type=Path, default=ROOT / "results" / "scene-reference-v1")
+    recalibrate.add_argument("--output-root", type=Path, default=DEFAULT_DATA_ROOT / "outputs" / "runs" / "scene-reference-v1")
     recalibrate.set_defaults(handler=_recalibrate)
 
     adjust = subparsers.add_parser(

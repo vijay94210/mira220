@@ -27,9 +27,33 @@ C:\Users\jayal\git\openRGB-IR
 
 Override it with `--openrgbir-repo` when necessary.
 
+## Data Root
+
+Large inputs and generated products live outside the Git worktree. By default
+the CLI uses:
+
+```text
+C:\Users\jayal\droid-data
+```
+
+Override it for a shell session with:
+
+```powershell
+$env:MIRA220_DATA_ROOT = "D:\mira220-data"
+```
+
+The data root has three main roles:
+
+- `raw/`: loose Mira RAW inputs for normal batch processing.
+- `sessions/`: structured capture bundles that keep Mira RAWs and Mapir TIFFs
+  together for a field session.
+- `outputs/`: generated reflectance products, NDVI images, comparisons,
+  summaries, smoke-test outputs, and presentations.
+
 ## Process RAW Images
 
-Put unpacked 1600x1400 uint16 Mira220 RAWs in `data/raw/`, then run:
+Put unpacked 1600x1400 uint16 Mira220 RAWs in
+`C:\Users\jayal\droid-data\raw\`, then run:
 
 ```powershell
 python -m mira220 process
@@ -38,11 +62,12 @@ python -m mira220 process
 Process another directory:
 
 ```powershell
-python -m mira220 process "D:\captures" --recursive --run-id survey-001
+python -m mira220 process "C:\Users\jayal\droid-data\raw\survey-001" --recursive --run-id survey-001
 ```
 
-Results are written to `results/<run-id>/<raw-name>/`. Incompatible RAW sizes
-are skipped and recorded in `run_summary.json`.
+Results are written to
+`C:\Users\jayal\droid-data\outputs\runs\<run-id>\<raw-name>\`.
+Incompatible RAW sizes are skipped and recorded in `run_summary.json`.
 
 Every processed capture writes calibrated reflectance TIFFs, `ndvi.tiff`,
 `ndvi_gray.png`, `ndvi_false_color.png`, `rgn_preview.png`, and
@@ -56,14 +81,14 @@ target and you want both the validated model output and an experimental
 session-affine variant:
 
 ```powershell
-python -m mira220 process-session "D:\captures" --recursive --run-id survey-001
+python -m mira220 process-session "C:\Users\jayal\droid-data\raw\survey-001" --recursive --run-id survey-001
 ```
 
 Results are written to:
 
 ```text
-results/<run-id>/validated/<raw-name>/
-results/<run-id>/affine-adjusted/<raw-name>/
+C:\Users\jayal\droid-data\outputs\runs\<run-id>\validated\<raw-name>\
+C:\Users\jayal\droid-data\outputs\runs\<run-id>\affine-adjusted\<raw-name>\
 ```
 
 `validated/` is always produced from `flat_patch_v1` and does not require a
@@ -76,8 +101,8 @@ run inherit the session affine correction when the fit succeeds.
 
 ```powershell
 python -m mira220 fit `
-  --mira-raw "C:\path\to\mira.raw" `
-  --gold-tiff "C:\path\to\gold_reflectance_rgn.tif"
+  --mira-raw "C:\Users\jayal\droid-data\calibration\mira\mira.raw" `
+  --gold-tiff "C:\Users\jayal\droid-data\calibration\mapir\gold_reflectance_rgn.tif"
 ```
 
 This updates `config/models/flat_patch_v1.yaml` and writes the compact evidence
@@ -86,7 +111,7 @@ set to `calibration/evidence/`.
 ## Inspect a Processed Image
 
 ```powershell
-python -m mira220 inspect "results\survey-001\capture-name"
+python -m mira220 inspect "C:\Users\jayal\droid-data\outputs\runs\survey-001\capture-name"
 ```
 
 The inspection report includes model provenance, patch Red/Green/IR/NDVI, and
@@ -100,24 +125,27 @@ See [docs/pipeline.md](docs/pipeline.md) for the correction equations and
 Use this optional workflow when validating outputs or refining the model with
 additional training data. Place calibrated three-channel Red/Green/NIR
 gold-camera TIFFs containing ArUco marker `830` under the gitignored
-`data/gold/` directory. Mira inputs are processed output directories containing
-`ndvi.tiff` and `rgn_reflectance.tiff`.
+`C:\Users\jayal\droid-data\gold\` directory. Mira inputs are processed output
+directories containing `ndvi.tiff` and `rgn_reflectance.tiff`.
 
 Compare one pair:
 
 ```powershell
-python -m mira220 compare "results\survey-001\capture-name" "data\gold\gold-001.tif"
+python -m mira220 compare `
+  "C:\Users\jayal\droid-data\outputs\runs\survey-001\capture-name" `
+  "C:\Users\jayal\droid-data\gold\gold-001.tif"
 ```
 
 Compare every discovered Mira output with every gold TIFF and rank the
 candidates for each Mira capture:
 
 ```powershell
-python -m mira220 compare-all --mira-root results --gold-dir data/gold
+python -m mira220 compare-all
 ```
 
-Results are written under `results/comparisons/`. The top-ranked pair is only a
-candidate; visually confirm its `alignment_overlay.png` before treating its
+Results are written under
+`C:\Users\jayal\droid-data\outputs\comparisons\`. The top-ranked pair is only
+a candidate; visually confirm its `alignment_overlay.png` before treating its
 regression metrics as authoritative. Regression plots and primary metrics use
 valid-pixel-weighted 16x16 NDVI block averages; reports also retain pixel-level
 metrics under `pixel_metrics`.
@@ -131,8 +159,8 @@ and does not replace the general `flat_patch_v1` model.
 Apply it to existing reflectance outputs without rerunning openRGB-IR:
 
 ```powershell
-python -m mira220 recalibrate "results\survey-001" `
-  --output-root "results\survey-001-scene-reference-v1"
+python -m mira220 recalibrate "C:\Users\jayal\droid-data\outputs\runs\survey-001" `
+  --output-root "C:\Users\jayal\droid-data\outputs\runs\survey-001-scene-reference-v1"
 ```
 
 For future RAW processing of the same scene:
@@ -146,17 +174,18 @@ python -m mira220 process --model config/models/scene_reference_v1.yaml
 Place a session's Mira RAW and calibrated Mapir R/G/NIR TIFF files under:
 
 ```text
-data/sessions/<session-id>/mira/raw/
-data/sessions/<session-id>/mapir/tiff/
+C:\Users\jayal\droid-data\sessions\<session-id>\mira\raw\
+C:\Users\jayal\droid-data\sessions\<session-id>\mapir\tiff\
 ```
 
 This evaluation command processes both models, fits Mira-only target lighting
 adjustments, and compares all four variants against held-out Mapir images:
 
 ```powershell
-python -m mira220 validate-session "data\sessions\2026-06-05"
+python -m mira220 validate-session "C:\Users\jayal\droid-data\sessions\2026-06-05"
 ```
 
-Results are written to `results/sessions/<session-id>/`. Mapir images are never
-used to fit the target session adjustment.
+Results are written to
+`C:\Users\jayal\droid-data\outputs\sessions\<session-id>\`. Mapir images are
+never used to fit the target session adjustment.
 

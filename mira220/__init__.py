@@ -1,9 +1,11 @@
 """Mira220 RGB-IR reflectance processing."""
 
+import os
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_DATA_ROOT = Path(os.environ.get("MIRA220_DATA_ROOT", r"C:\Users\jayal\droid-data"))
 DEFAULT_MODEL_PATH = ROOT / "config" / "models" / "flat_patch_v1.yaml"
 DEFAULT_ISP_CONFIG_PATH = ROOT / "config" / "isp" / "zero_cut.yaml"
 DEFAULT_TARGET_PATH = ROOT / "config" / "targets" / "aruco830_flat_patches.yaml"
