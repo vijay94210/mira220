@@ -30,6 +30,7 @@ PROCESSED_SENTINELS = (
     "ndvi.tiff",
     "ndvi_gray.png",
     "ndvi_false_color.png",
+    "ndvi_false_color_crop.png",
     "rgb_preview.png",
     "rgn_preview.png",
     "rgn_reflectance.tiff",

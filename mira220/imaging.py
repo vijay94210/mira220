@@ -8,6 +8,15 @@ import tifffile
 
 
 EPSILON = 1e-6
+NDVI_SMOOTHING_SIGMA = 1.0
+NDVI_CROP_MARGINS = (150, 125, 150, 125)
+NDVI_COLORMAP = [
+    (0.00, (120, 40, 30)),
+    (0.30, (200, 110, 60)),
+    (0.50, (220, 210, 130)),
+    (0.70, (120, 185, 90)),
+    (1.00, (0, 100, 50)),
+]
 
 
 def normalize_sensor(image: np.ndarray, bit_depth: int = 12) -> np.ndarray:
@@ -27,23 +36,46 @@ def preview_u8(image: np.ndarray, gamma: float | None = None) -> np.ndarray:
     return np.round(clipped * 255.0).astype(np.uint8)
 
 
+def smooth_ndvi_for_display(ndvi: np.ndarray, sigma: float = NDVI_SMOOTHING_SIGMA) -> np.ndarray:
+    values = np.asarray(ndvi, np.float32)
+    if sigma <= 0:
+        return values
+    finite = np.isfinite(values)
+    if finite.all():
+        return cv2.GaussianBlur(values, (0, 0), sigma)
+    filled = values.copy()
+    filled[~finite] = float(np.nanmedian(values[finite])) if np.any(finite) else 0.0
+    smoothed = cv2.GaussianBlur(filled, (0, 0), sigma)
+    smoothed[~finite] = np.nan
+    return smoothed
+
+
 def ndvi_false_color(ndvi: np.ndarray, minimum: float, maximum: float) -> np.ndarray:
     normalized = np.clip((ndvi - minimum) / (maximum - minimum), 0.0, 1.0)
-    positions = np.array([0.00, 0.18, 0.34, 0.52, 0.68, 0.84, 1.00], np.float32)
-    colors_rgb = np.array(
-        [
-            [154, 0, 47],
-            [221, 55, 39],
-            [253, 174, 97],
-            [255, 255, 191],
-            [166, 217, 106],
-            [26, 150, 65],
-            [0, 104, 55],
-        ],
-        np.float32,
-    )
+    positions = np.array([point for point, _ in NDVI_COLORMAP], np.float32)
+    colors_rgb = np.array([color for _, color in NDVI_COLORMAP], np.float32)
     channels = [np.interp(normalized, positions, colors_rgb[:, channel]) for channel in range(3)]
     return np.round(np.stack(channels, axis=-1)).astype(np.uint8)
+
+
+def crop_valid_region(
+    image: np.ndarray,
+    margins: tuple[int, int, int, int] = NDVI_CROP_MARGINS,
+) -> np.ndarray:
+    left, top, right, bottom = margins
+    height, width = image.shape[:2]
+    if left < 0 or top < 0 or right < 0 or bottom < 0:
+        raise ValueError("Crop margins must be non-negative.")
+    if left + right >= width or top + bottom >= height:
+        raise ValueError(f"Crop margins {margins} remove the entire {width}x{height} image.")
+    return image[top : height - bottom, left : width - right].copy()
+
+
+def crop_valid_region_or_full(image: np.ndarray) -> np.ndarray:
+    try:
+        return crop_valid_region(image)
+    except ValueError:
+        return np.asarray(image).copy()
 
 
 def write_rgb_preview(path: Path, image: np.ndarray, gamma: float = 2.2) -> None:
@@ -62,6 +94,7 @@ def save_reflectance_products(
     output_dir.mkdir(parents=True, exist_ok=True)
     rgn = np.dstack([red, green, ir]).astype(np.float32)
     ndvi = compute_ndvi(red, ir)
+    ndvi_display = smooth_ndvi_for_display(ndvi)
     tifffile.imwrite(output_dir / "red_reflectance.tiff", red.astype(np.float32))
     tifffile.imwrite(output_dir / "green_reflectance.tiff", green.astype(np.float32))
     tifffile.imwrite(output_dir / "ir_reflectance.tiff", ir.astype(np.float32))
@@ -72,11 +105,15 @@ def save_reflectance_products(
     write_rgb_preview(output_dir / "rgn_preview.png", rgn)
     cv2.imwrite(
         str(output_dir / "ndvi_false_color.png"),
-        cv2.cvtColor(ndvi_false_color(ndvi, ndvi_min, ndvi_max), cv2.COLOR_RGB2BGR),
+        cv2.cvtColor(ndvi_false_color(ndvi_display, ndvi_min, ndvi_max), cv2.COLOR_RGB2BGR),
+    )
+    cv2.imwrite(
+        str(output_dir / "ndvi_false_color_crop.png"),
+        cv2.cvtColor(ndvi_false_color(crop_valid_region_or_full(ndvi_display), ndvi_min, ndvi_max), cv2.COLOR_RGB2BGR),
     )
     cv2.imwrite(
         str(output_dir / "ndvi_gray.png"),
-        preview_u8((ndvi - ndvi_min) / (ndvi_max - ndvi_min)),
+        preview_u8((ndvi_display - ndvi_min) / (ndvi_max - ndvi_min)),
     )
 
 
