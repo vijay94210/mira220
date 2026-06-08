@@ -90,15 +90,19 @@ def save_reflectance_products(
     ndvi_min: float,
     ndvi_max: float,
     rgb: np.ndarray | None = None,
+    product_set: str = "full",
 ) -> None:
+    if product_set not in {"full", "ndvi"}:
+        raise ValueError(f"Unsupported product set: {product_set}")
     output_dir.mkdir(parents=True, exist_ok=True)
     rgn = np.dstack([red, green, ir]).astype(np.float32)
     ndvi = compute_ndvi(red, ir)
     ndvi_display = smooth_ndvi_for_display(ndvi)
-    tifffile.imwrite(output_dir / "red_reflectance.tiff", red.astype(np.float32))
-    tifffile.imwrite(output_dir / "green_reflectance.tiff", green.astype(np.float32))
-    tifffile.imwrite(output_dir / "ir_reflectance.tiff", ir.astype(np.float32))
-    tifffile.imwrite(output_dir / "rgn_reflectance.tiff", rgn)
+    if product_set == "full":
+        tifffile.imwrite(output_dir / "red_reflectance.tiff", red.astype(np.float32))
+        tifffile.imwrite(output_dir / "green_reflectance.tiff", green.astype(np.float32))
+        tifffile.imwrite(output_dir / "ir_reflectance.tiff", ir.astype(np.float32))
+        tifffile.imwrite(output_dir / "rgn_reflectance.tiff", rgn)
     tifffile.imwrite(output_dir / "ndvi.tiff", ndvi.astype(np.float32))
     if rgb is not None:
         write_rgb_preview(output_dir / "rgb_preview.png", np.asarray(rgb, np.float32))

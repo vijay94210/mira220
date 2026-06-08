@@ -37,6 +37,9 @@ from .session import adjust_session, summarize_clipping
 
 
 PROCESSED_SENTINELS = (
+    "red_reflectance.tiff",
+    "green_reflectance.tiff",
+    "ir_reflectance.tiff",
     "ndvi.tiff",
     "ndvi_gray.png",
     "ndvi_false_color.png",
@@ -44,6 +47,20 @@ PROCESSED_SENTINELS = (
     "rgb_preview.png",
     "rgn_preview.png",
     "rgn_reflectance.tiff",
+)
+NDVI_PRODUCT_SENTINELS = (
+    "ndvi.tiff",
+    "ndvi_gray.png",
+    "ndvi_false_color.png",
+    "ndvi_false_color_crop.png",
+    "rgb_preview.png",
+    "rgn_preview.png",
+)
+CANDIDATE_SENTINELS = (
+    "candidate_overlay.png",
+    "candidate_mask.png",
+    "candidates.csv",
+    "candidate_summary.json",
 )
 RAW_TIMESTAMP_RE = re.compile(r"(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})_(?P<hour>\d{2})_(?P<minute>\d{2})_(?P<second>\d{2})")
 
@@ -65,8 +82,37 @@ def _capture_output_name(raw_path: Path) -> str:
     )
 
 
-def _is_processed_output(output_dir: Path) -> bool:
-    return all((output_dir / name).is_file() for name in PROCESSED_SENTINELS)
+def _processed_sentinels(product_set: str) -> tuple[str, ...]:
+    if product_set == "full":
+        return PROCESSED_SENTINELS
+    if product_set == "ndvi":
+        return NDVI_PRODUCT_SENTINELS
+    raise ValueError(f"Unsupported product set: {product_set}")
+
+
+def _is_processed_output(output_dir: Path, product_set: str = "full") -> bool:
+    return all((output_dir / name).is_file() for name in _processed_sentinels(product_set))
+
+
+def _has_candidate_outputs(output_dir: Path) -> bool:
+    return all((output_dir / name).is_file() for name in CANDIDATE_SENTINELS)
+
+
+def _write_candidates_for_output(output_dir: Path, force: bool = False) -> dict:
+    if _has_candidate_outputs(output_dir) and not force:
+        return {"output_directory": str(output_dir.resolve()), "status": "skipped", "reason": "already exists"}
+    source = load_ndvi_source(output_dir)
+    candidates, _ = detect_candidates(source)
+    write_candidate_overlay(output_dir / "candidate_overlay.png", source.background, candidates, CandidateConfig())
+    write_candidate_mask(output_dir / "candidate_mask.png", source.ndvi.shape, candidates)
+    write_candidates_csv(output_dir / "candidates.csv", candidates)
+    summary = summarize_candidates(source, output_dir, CandidateConfig(), candidates)
+    (output_dir / "candidate_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return {
+        "output_directory": str(output_dir.resolve()),
+        "status": "generated",
+        "candidate_count": len(candidates),
+    }
 
 
 def _fit(args: argparse.Namespace) -> int:
@@ -105,6 +151,9 @@ def _process_run(
     openrgbir_repo: Path,
     isp_config: Path,
     keep_intermediates: bool,
+    product_set: str = "full",
+    detect_candidates_flag: bool = False,
+    force_candidates: bool = False,
 ) -> dict:
     model = load_yaml(model_path)
     pattern = "**/*.raw" if recursive else "*.raw"
@@ -113,6 +162,9 @@ def _process_run(
         raise SystemExit(f"No RAW files found in {raw_dir.resolve()}")
     processed = []
     skipped = []
+    candidate_generated = []
+    candidate_skipped = []
+    candidate_failed = []
     for raw_path in raw_paths:
         if not is_compatible_raw(raw_path):
             skipped.append({"path": str(raw_path.resolve()), "reason": "incompatible RAW size"})
@@ -120,12 +172,28 @@ def _process_run(
             continue
         relative_parent = raw_path.parent.relative_to(raw_dir)
         output_dir = run_dir / relative_parent / _capture_output_name(raw_path)
-        if _is_processed_output(output_dir):
+        if _is_processed_output(output_dir, product_set):
+            candidate_result = None
+            if detect_candidates_flag:
+                try:
+                    candidate_result = _write_candidates_for_output(output_dir, force=force_candidates)
+                    if candidate_result["status"] == "generated":
+                        candidate_generated.append(candidate_result)
+                    else:
+                        candidate_skipped.append(candidate_result)
+                except Exception as exc:  # pragma: no cover - defensive summary path
+                    candidate_result = {
+                        "output_directory": str(output_dir.resolve()),
+                        "status": "failed",
+                        "error": str(exc),
+                    }
+                    candidate_failed.append(candidate_result)
             skipped.append(
                 {
                     "path": str(raw_path.resolve()),
                     "output_directory": str(output_dir.resolve()),
                     "reason": "already processed",
+                    "candidate_result": candidate_result,
                 }
             )
             print(f"Skipping already processed RAW: {raw_path.name} -> {output_dir}")
@@ -149,14 +217,37 @@ def _process_run(
             display["ndvi_min"],
             display["ndvi_max"],
             rgb=rgb,
+            product_set=product_set,
         )
-        processed.append(str(raw_path.resolve()))
+        candidate_result = None
+        if detect_candidates_flag:
+            try:
+                candidate_result = _write_candidates_for_output(output_dir, force=True)
+                candidate_generated.append(candidate_result)
+            except Exception as exc:  # pragma: no cover - defensive summary path
+                candidate_result = {
+                    "output_directory": str(output_dir.resolve()),
+                    "status": "failed",
+                    "error": str(exc),
+                }
+                candidate_failed.append(candidate_result)
+        processed.append(
+            {
+                "path": str(raw_path.resolve()),
+                "output_directory": str(output_dir.resolve()),
+                "candidate_result": candidate_result,
+            }
+        )
         print(f"Processed {raw_path.name} -> {output_dir}")
     summary = {
         "model": str(model_path.resolve()),
         "input_directory": str(raw_dir.resolve()),
+        "product_set": product_set,
         "processed": processed,
         "skipped": skipped,
+        "candidate_generated": candidate_generated,
+        "candidate_skipped": candidate_skipped,
+        "candidate_failed": candidate_failed,
     }
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "run_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -174,6 +265,9 @@ def _process(args: argparse.Namespace) -> int:
         args.openrgbir_repo,
         args.isp_config,
         args.keep_intermediates,
+        product_set=args.product_set,
+        detect_candidates_flag=args.detect_candidates,
+        force_candidates=args.force_candidates,
     )
     return 0
 
@@ -483,6 +577,9 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--run-id")
     process.add_argument("--recursive", action="store_true")
     process.add_argument("--keep-intermediates", action="store_true")
+    process.add_argument("--product-set", choices=("full", "ndvi"), default="full")
+    process.add_argument("--detect-candidates", action="store_true")
+    process.add_argument("--force-candidates", action="store_true")
     _add_shared_paths(process)
     process.set_defaults(handler=_process)
 

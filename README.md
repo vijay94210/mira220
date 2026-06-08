@@ -66,14 +66,31 @@ Process another directory:
 python -m mira220 process "C:\Users\jayal\droid-data\raw\survey-001" --recursive --run-id survey-001
 ```
 
+Process RAWs and write candidate detection outputs into each processed capture
+folder beside `ndvi.tiff`:
+
+```powershell
+python -m mira220 process "C:\Users\jayal\droid-data\raw\survey-001" --recursive --run-id survey-001 --detect-candidates
+```
+
+Use NDVI-only output mode to reduce disk usage for future review runs:
+
+```powershell
+python -m mira220 process "C:\Users\jayal\droid-data\raw\survey-001" --recursive --run-id survey-001 --product-set ndvi --detect-candidates
+```
+
+`--product-set ndvi` skips bulky per-channel reflectance TIFFs and keeps the
+NDVI/candidate review products. Existing candidate outputs are reused; add
+`--force-candidates` to regenerate them.
+
 Results are written to
 `C:\Users\jayal\droid-data\outputs\runs\<run-id>\<raw-name>\`.
 Incompatible RAW sizes are skipped and recorded in `run_summary.json`.
 
 Every processed capture writes calibrated reflectance TIFFs, `ndvi.tiff`,
-`ndvi_gray.png`, `ndvi_false_color.png`, `rgn_preview.png`, and
-`rgb_preview.png`. ArUco target detection is not required for this base
-processing path.
+`ndvi_gray.png`, `ndvi_false_color.png`, `ndvi_false_color_crop.png`,
+`rgn_preview.png`, and `rgb_preview.png` in the default `full` product set.
+ArUco target detection is not required for this base processing path.
 
 ## Process A Session With Optional Target Adjustment
 
@@ -132,6 +149,10 @@ cropped physical `ndvi.tiff` values and overlays results on
 `ndvi_false_color_crop.png` when available. The command writes
 `candidate_overlay.png`, `candidate_mask.png`, `candidates.csv`, and
 `candidate_summary.json`.
+
+When candidate detection is run through `process --detect-candidates`, those
+same files are written directly into each processed capture folder instead of
+the shared `outputs\candidates` folder.
 
 The detector builds broad NDVI regions first, then adds texture-heavy regions.
 The overlay colors are red for broad NDVI regions and orange for texture-heavy
