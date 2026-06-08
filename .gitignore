@@ -3,7 +3,9 @@ __pycache__/
 .pytest_cache/
 .tmp/
 .pytest-tmp/
+.pytest-tmp*/
 pytest-tmp/
+pytest-tmp*/
 pytest-cache/
 
 data/raw/*

@@ -77,7 +77,7 @@ def test_reflectance_products_include_ndvi_and_previews(tmp_path: Path) -> None:
 
 def test_raw_capture_output_name_uses_trimmed_timestamp() -> None:
     raw = Path("1600x1400_Bit12_RGB-IR_RGB-IRMod(GRIG)_2026-05-02_19_36_16.raw")
-    assert _capture_output_name(raw) == "2026-02-05_19_36_16"
+    assert _capture_output_name(raw) == "2026-05-02_19_36_16"
 
 
 def test_raw_capture_output_name_falls_back_to_stem() -> None:

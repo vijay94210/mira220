@@ -7,6 +7,7 @@ python -m mira220 fit
 python -m mira220 process
 python -m mira220 process-session
 python -m mira220 inspect
+python -m mira220 detect-candidates
 ```
 
 The default model is `config/models/flat_patch_v1.yaml`. It processes Mira220
@@ -116,6 +117,42 @@ python -m mira220 inspect "C:\Users\jayal\droid-data\outputs\runs\survey-001\cap
 
 The inspection report includes model provenance, patch Red/Green/IR/NDVI, and
 channel clipping fractions.
+
+## Detect Cropped NDVI Candidate Regions
+
+Use candidate detection on a processed output directory or a direct NDVI TIFF:
+
+```powershell
+python -m mira220 detect-candidates "C:\Users\jayal\droid-data\outputs\runs\survey-001\capture-name"
+```
+
+By default, results are written under
+`C:\Users\jayal\droid-data\outputs\candidates\<input-name>\`. Detection uses
+cropped physical `ndvi.tiff` values and overlays results on
+`ndvi_false_color_crop.png` when available. The command writes
+`candidate_overlay.png`, `candidate_mask.png`, `candidates.csv`, and
+`candidate_summary.json`.
+
+The detector builds broad NDVI regions first, then adds texture-heavy regions.
+The overlay colors are red for broad NDVI regions and orange for texture-heavy
+regions. Candidate regions are labeled with their candidate IDs, and the overlay
+adds a right-side panel with an NDVI false-color scale plus the NDVI class
+legend. The mask image is an ID mask where each candidate pixel value maps to a
+candidate row.
+
+Useful controls:
+
+```powershell
+python -m mira220 detect-candidates "<processed-output-dir>" `
+  --threshold-mode percentile `
+  --min-area 15000 `
+  --morph-open 5 `
+  --morph-close 31 `
+  --min-contrast 0.03 `
+  --texture-sensitivity 0.18 `
+  --simplify-epsilon 8 `
+  --geometry contour
+```
 
 See [docs/pipeline.md](docs/pipeline.md) for the correction equations and
 [docs/experiments.md](docs/experiments.md) for the historical experiment record.

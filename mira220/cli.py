@@ -20,6 +20,15 @@ from . import (
     ROOT,
 )
 from .calibration import fit_flat_patch_model, inspect_products
+from .candidates import (
+    CandidateConfig,
+    detect_candidates,
+    load_ndvi_source,
+    summarize_candidates,
+    write_candidate_overlay,
+    write_candidate_mask,
+    write_candidates_csv,
+)
 from .comparison import compare_all, compare_pair
 from .correction import apply_model, apply_scene_correction, load_yaml, write_yaml
 from .imaging import ndvi_false_color, normalize_sensor, save_reflectance_products
@@ -51,7 +60,7 @@ def _capture_output_name(raw_path: Path) -> str:
         return raw_path.stem
     parts = match.groupdict()
     return (
-        f"{parts['year']}-{parts['day']}-{parts['month']}_"
+        f"{parts['year']}-{parts['month']}-{parts['day']}_"
         f"{parts['hour']}_{parts['minute']}_{parts['second']}"
     )
 
@@ -250,6 +259,52 @@ def _compare_all(args: argparse.Namespace) -> int:
     summary = compare_all(args.mira_root, args.gold_dir, args.output_dir, load_yaml(args.target_config))
     print(json.dumps({key: value for key, value in summary.items() if key != "pairs"}, indent=2))
     print("Best-pair selections require visual confirmation of alignment_overlay.png.")
+    return 0
+
+
+def _candidate_output_dir(input_path: Path) -> Path:
+    name = input_path.name if input_path.name else input_path.resolve().name
+    if input_path.is_file():
+        name = input_path.stem
+    return DEFAULT_DATA_ROOT / "outputs" / "candidates" / name
+
+
+def _detect_candidates(args: argparse.Namespace) -> int:
+    config = CandidateConfig(
+        top_n=args.top_n,
+        threshold_mode=args.threshold_mode,
+        manual_threshold=args.manual_threshold,
+        invert_mask=args.invert_mask,
+        min_area=args.min_area,
+        min_contrast=args.min_contrast,
+        large_region_area=args.large_region_area,
+        morph_open=args.morph_open,
+        morph_close=args.morph_close,
+        hole_fill_area=args.hole_fill_area,
+        simplify_epsilon=args.simplify_epsilon,
+        texture_window=args.texture_window,
+        texture_sensitivity=args.texture_sensitivity,
+        geometry_min_solidity=args.geometry_min_solidity,
+        geometry=args.geometry,
+        box_thickness=args.box_thickness,
+        crop=not args.no_crop,
+        percentile_low=args.percentile_low,
+        percentile_high=args.percentile_high,
+        high_threshold=args.high_threshold,
+        medium_threshold=args.medium_threshold,
+        low_threshold=args.low_threshold,
+        show_class_colors=args.show_class_colors,
+    )
+    source = load_ndvi_source(args.image_or_output_dir, crop=config.crop)
+    candidates, _ = detect_candidates(source, config)
+    output_dir = args.output_dir or _candidate_output_dir(args.image_or_output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    write_candidate_overlay(output_dir / "candidate_overlay.png", source.background, candidates, config)
+    write_candidate_mask(output_dir / "candidate_mask.png", source.ndvi.shape, candidates)
+    write_candidates_csv(output_dir / "candidates.csv", candidates)
+    summary = summarize_candidates(source, output_dir, config, candidates)
+    (output_dir / "candidate_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(json.dumps({key: value for key, value in summary.items() if key != "top_candidates"}, indent=2))
     return 0
 
 
@@ -464,6 +519,34 @@ def build_parser() -> argparse.ArgumentParser:
     compare_batch.add_argument("--output-dir", type=Path, default=DEFAULT_DATA_ROOT / "outputs" / "comparisons")
     compare_batch.add_argument("--target-config", type=Path, default=DEFAULT_TARGET_PATH)
     compare_batch.set_defaults(handler=_compare_all)
+
+    candidates = subparsers.add_parser("detect-candidates", help="Detect cropped NDVI candidate regions.")
+    candidates.add_argument("image_or_output_dir", type=Path)
+    candidates.add_argument("--output-dir", type=Path)
+    candidates.add_argument("--top-n", type=int, default=25)
+    candidates.add_argument("--threshold-mode", choices=("manual", "otsu", "adaptive", "percentile"), default="percentile")
+    candidates.add_argument("--manual-threshold", type=float)
+    candidates.add_argument("--invert-mask", action="store_true")
+    candidates.add_argument("--min-area", type=int, default=15000)
+    candidates.add_argument("--min-contrast", type=float, default=0.03)
+    candidates.add_argument("--large-region-area", type=int, default=50000)
+    candidates.add_argument("--morph-open", type=int, default=5)
+    candidates.add_argument("--morph-close", type=int, default=31)
+    candidates.add_argument("--hole-fill-area", type=int, default=4000)
+    candidates.add_argument("--simplify-epsilon", type=float, default=8.0)
+    candidates.add_argument("--texture-window", type=int, default=21)
+    candidates.add_argument("--texture-sensitivity", type=float, default=0.18)
+    candidates.add_argument("--geometry-min-solidity", type=float, default=0.82)
+    candidates.add_argument("--geometry", choices=("auto", "box", "contour"), default="contour")
+    candidates.add_argument("--box-thickness", type=int, default=8)
+    candidates.add_argument("--percentile-low", type=float, default=1.0)
+    candidates.add_argument("--percentile-high", type=float, default=99.0)
+    candidates.add_argument("--no-crop", action="store_true")
+    candidates.add_argument("--show-class-colors", action="store_true")
+    candidates.add_argument("--high-threshold", type=float, default=0.45)
+    candidates.add_argument("--medium-threshold", type=float, default=0.18)
+    candidates.add_argument("--low-threshold", type=float, default=0.05)
+    candidates.set_defaults(handler=_detect_candidates)
 
     recalibrate = subparsers.add_parser(
         "recalibrate", help="Apply a scene correction to existing reflectance outputs."

@@ -1,0 +1,720 @@
+from __future__ import annotations
+
+import csv
+import json
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Literal
+
+import cv2
+import numpy as np
+import tifffile
+
+from .imaging import (
+    NDVI_CROP_MARGINS,
+    crop_valid_region,
+    crop_valid_region_or_full,
+    ndvi_false_color,
+)
+
+
+ThresholdMode = Literal["manual", "otsu", "adaptive", "percentile"]
+GeometryMode = Literal["auto", "box", "contour"]
+
+CANDIDATE_COLORS_BGR = {
+    "broad_ndvi_region": (0, 0, 255),
+    "texture_region": (0, 165, 255),
+}
+CANDIDATE_COLORS_RGB = {
+    "broad_ndvi_region": "#FF0000",
+    "texture_region": "#FFA500",
+}
+NDVI_CLASS_LABELS = {
+    "high_vegetation": "High vegetation",
+    "medium_vegetation": "Medium vegetation",
+    "low_vegetation": "Low vegetation / exposed ground",
+    "non_vegetation_artifact": "Non-vegetation / artifact",
+}
+NDVI_CLASS_COLORS_BGR = {
+    "high_vegetation": (35, 145, 35),
+    "medium_vegetation": (90, 185, 120),
+    "low_vegetation": (60, 145, 215),
+    "non_vegetation_artifact": (180, 80, 180),
+}
+NDVI_CLASSES = (
+    "high_vegetation",
+    "medium_vegetation",
+    "low_vegetation",
+    "non_vegetation_artifact",
+)
+
+CSV_FIELDS = (
+    "id",
+    "candidate_type",
+    "ndvi_class",
+    "geometry_type",
+    "bbox_x",
+    "bbox_y",
+    "bbox_width",
+    "bbox_height",
+    "centroid_x",
+    "centroid_y",
+    "area_pixels",
+    "perimeter_pixels",
+    "mean_ndvi",
+    "median_ndvi",
+    "min_ndvi",
+    "max_ndvi",
+    "std_ndvi",
+    "contrast_score",
+    "aspect_ratio",
+    "solidity",
+    "circularity",
+    "extent",
+    "texture_score",
+    "line_length",
+    "line_angle_degrees",
+    "total_score",
+    "points",
+)
+
+
+@dataclass(frozen=True)
+class CandidateConfig:
+    top_n: int = 25
+    threshold_mode: ThresholdMode = "percentile"
+    manual_threshold: float | None = None
+    invert_mask: bool = False
+    min_area: int = 15000
+    min_contrast: float = 0.03
+    large_region_area: int = 50000
+    morph_open: int = 5
+    morph_close: int = 31
+    hole_fill_area: int = 4000
+    simplify_epsilon: float = 8.0
+    texture_window: int = 21
+    texture_sensitivity: float = 0.18
+    geometry_min_solidity: float = 0.82
+    geometry: GeometryMode = "contour"
+    box_thickness: int = 8
+    crop: bool = True
+    percentile_low: float = 1.0
+    percentile_high: float = 99.0
+    high_threshold: float = 0.45
+    medium_threshold: float = 0.18
+    low_threshold: float = 0.05
+    show_class_colors: bool = False
+
+
+@dataclass(frozen=True)
+class NdviSource:
+    input_path: Path
+    ndvi_path: Path | None
+    ndvi: np.ndarray
+    background: np.ndarray
+    physical_ndvi: bool
+    crop_margins: tuple[int, int, int, int] | None
+    original_shape: tuple[int, int]
+    source_bgr: np.ndarray | None = None
+
+
+def _read_ndvi_tiff(path: Path) -> np.ndarray:
+    ndvi = tifffile.imread(path)
+    if ndvi.ndim != 2:
+        raise ValueError(f"{path} must be a two-dimensional NDVI TIFF.")
+    return ndvi.astype(np.float32)
+
+
+def _filled_ndvi(ndvi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    values = np.asarray(ndvi, np.float32)
+    finite = np.isfinite(values)
+    if not finite.any():
+        raise ValueError("NDVI input contains no finite pixels.")
+    filled = values.copy()
+    filled[~finite] = float(np.nanmedian(values[finite]))
+    return filled, finite
+
+
+def robust_normalize(
+    ndvi: np.ndarray,
+    low_percentile: float = 1.0,
+    high_percentile: float = 99.0,
+) -> np.ndarray:
+    filled, finite = _filled_ndvi(ndvi)
+    low, high = np.percentile(filled[finite], [low_percentile, high_percentile])
+    if high <= low:
+        high = low + 1e-6
+    normalized = np.clip((filled - low) / (high - low), 0.0, 1.0)
+    normalized[~finite] = 0.0
+    return normalized.astype(np.float32)
+
+
+def _default_background(ndvi: np.ndarray) -> np.ndarray:
+    filled, finite = _filled_ndvi(ndvi)
+    filled[~finite] = float(np.nanmedian(filled[finite]))
+    return cv2.cvtColor(ndvi_false_color(filled, -0.2, 0.7), cv2.COLOR_RGB2BGR)
+
+
+def _read_background(path: Path, shape: tuple[int, int]) -> np.ndarray | None:
+    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if image is None or image.shape[:2] != shape:
+        return None
+    return image
+
+
+def _crop_or_full(image: np.ndarray, crop: bool) -> tuple[np.ndarray, tuple[int, int, int, int] | None]:
+    if not crop:
+        return np.asarray(image).copy(), None
+    try:
+        return crop_valid_region(image), NDVI_CROP_MARGINS
+    except ValueError:
+        return np.asarray(image).copy(), None
+
+
+def _load_png_source(path: Path, crop: bool) -> NdviSource:
+    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError(f"Could not read image {path}.")
+    adjacent_ndvi = path.parent / "ndvi.tiff"
+    if adjacent_ndvi.is_file():
+        physical = _read_ndvi_tiff(adjacent_ndvi)
+        expected = crop_valid_region_or_full(physical).shape if crop else physical.shape
+        if expected == image.shape[:2]:
+            ndvi, margins = _crop_or_full(physical, crop)
+            return NdviSource(path, adjacent_ndvi, ndvi, image, True, margins, physical.shape, image)
+        if physical.shape == image.shape[:2]:
+            return NdviSource(path, adjacent_ndvi, physical, image, True, None, physical.shape, image)
+    source_bgr, margins = _crop_or_full(image, crop)
+    gray = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    return NdviSource(path, None, gray, source_bgr, False, margins, image.shape[:2], source_bgr)
+
+
+def load_ndvi_source(path: Path, crop: bool = True) -> NdviSource:
+    path = Path(path)
+    if path.is_dir():
+        ndvi_path = path / "ndvi.tiff"
+        if not ndvi_path.is_file():
+            raise ValueError(f"{path} must contain ndvi.tiff.")
+        full_ndvi = _read_ndvi_tiff(ndvi_path)
+        ndvi, margins = _crop_or_full(full_ndvi, crop)
+        background = None
+        if crop:
+            background = _read_background(path / "ndvi_false_color_crop.png", ndvi.shape)
+        if background is None:
+            full_background = _read_background(path / "ndvi_false_color.png", full_ndvi.shape)
+            if full_background is not None:
+                background, _ = _crop_or_full(full_background, crop)
+        if background is None:
+            background = _default_background(ndvi)
+        return NdviSource(path, ndvi_path, ndvi, background, True, margins, full_ndvi.shape, background)
+
+    suffix = path.suffix.lower()
+    if suffix in {".tif", ".tiff"}:
+        full_ndvi = _read_ndvi_tiff(path)
+        ndvi, margins = _crop_or_full(full_ndvi, crop)
+        return NdviSource(path, path, ndvi, _default_background(ndvi), True, margins, full_ndvi.shape)
+    if suffix in {".png", ".jpg", ".jpeg"}:
+        return _load_png_source(path, crop)
+    raise ValueError(f"Unsupported candidate input type: {path}")
+
+
+def _odd_size(value: int, minimum: int = 3) -> int:
+    value = max(minimum, int(value))
+    return value if value % 2 else value + 1
+
+
+def _kernel(size: int) -> np.ndarray:
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_odd_size(size), _odd_size(size)))
+
+
+def _threshold_mask(normalized: np.ndarray, config: CandidateConfig) -> np.ndarray:
+    image_u8 = np.round(np.clip(normalized, 0, 1) * 255).astype(np.uint8)
+    if config.threshold_mode == "manual":
+        threshold = 0.5 if config.manual_threshold is None else float(config.manual_threshold)
+        mask = normalized >= threshold
+    elif config.threshold_mode == "otsu":
+        _, mask_u8 = cv2.threshold(image_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        mask = mask_u8 > 0
+    elif config.threshold_mode == "adaptive":
+        size = _odd_size(config.texture_window, 15)
+        mask_u8 = cv2.adaptiveThreshold(image_u8, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, size, -2)
+        mask = mask_u8 > 0
+    else:
+        threshold = np.percentile(normalized, 45)
+        mask = normalized >= threshold
+    return ~mask if config.invert_mask else mask
+
+
+def _false_color_class_masks(image_bgr: np.ndarray, config: CandidateConfig) -> dict[str, np.ndarray]:
+    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+    hue = hsv[..., 0].astype(np.float32)
+    saturation = hsv[..., 1].astype(np.float32) / 255.0
+    value = hsv[..., 2].astype(np.float32) / 255.0
+    green = (hue >= 35) & (hue <= 95) & (saturation >= 0.18)
+    orange = ((hue <= 25) | (hue >= 165)) & (saturation >= 0.12)
+    high = green & (value < 0.55)
+    medium = green & ~high
+    low = orange
+    non = ~(high | medium | low)
+    return {
+        "high_vegetation": high.astype(np.uint8) * 255,
+        "medium_vegetation": medium.astype(np.uint8) * 255,
+        "low_vegetation": low.astype(np.uint8) * 255,
+        "non_vegetation_artifact": non.astype(np.uint8) * 255,
+    }
+
+
+def _fill_small_holes(mask: np.ndarray, max_hole_area: int) -> np.ndarray:
+    if max_hole_area <= 0 or not np.any(mask):
+        return mask
+    inverse = (mask == 0).astype(np.uint8)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(inverse, 8)
+    output = mask.copy()
+    height, width = mask.shape
+    for label in range(1, count):
+        x, y, w, h, area = stats[label]
+        touches_edge = x == 0 or y == 0 or x + w >= width or y + h >= height
+        if not touches_edge and area <= max_hole_area:
+            output[labels == label] = 255
+    return output
+
+
+def _clean_and_sieve(mask: np.ndarray, config: CandidateConfig) -> np.ndarray:
+    clean = (mask > 0).astype(np.uint8) * 255
+    if config.morph_open > 0:
+        clean = cv2.morphologyEx(clean, cv2.MORPH_OPEN, _kernel(config.morph_open))
+    if config.morph_close > 0:
+        clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, _kernel(config.morph_close))
+    clean = _fill_small_holes(clean, config.hole_fill_area)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats((clean > 0).astype(np.uint8), 8)
+    sieved = np.zeros_like(clean)
+    for label in range(1, count):
+        if int(stats[label, cv2.CC_STAT_AREA]) >= config.min_area:
+            sieved[labels == label] = 255
+    return sieved
+
+
+def build_class_masks(
+    source_or_ndvi: NdviSource | np.ndarray,
+    config: CandidateConfig,
+) -> dict[str, np.ndarray]:
+    if isinstance(source_or_ndvi, NdviSource) and not source_or_ndvi.physical_ndvi and source_or_ndvi.source_bgr is not None:
+        raw_masks = _false_color_class_masks(source_or_ndvi.source_bgr, config)
+    else:
+        ndvi = source_or_ndvi.ndvi if isinstance(source_or_ndvi, NdviSource) else np.asarray(source_or_ndvi, np.float32)
+        filled, finite = _filled_ndvi(ndvi)
+        smooth = cv2.GaussianBlur(filled, (0, 0), 2.0)
+        if isinstance(source_or_ndvi, NdviSource) and source_or_ndvi.physical_ndvi:
+            high = finite & (smooth >= config.high_threshold)
+            medium = finite & (smooth >= config.medium_threshold) & (smooth < config.high_threshold)
+            low = finite & (smooth >= config.low_threshold) & (smooth < config.medium_threshold)
+            non = finite & (smooth < config.low_threshold)
+        else:
+            normalized = robust_normalize(filled, config.percentile_low, config.percentile_high)
+            base = _threshold_mask(normalized, config)
+            high = finite & base & (normalized >= 0.68)
+            medium = finite & base & (normalized >= 0.38) & (normalized < 0.68)
+            low = finite & (normalized >= 0.18) & (normalized < 0.38)
+            non = finite & (normalized < 0.18)
+        raw_masks = {
+            "high_vegetation": high.astype(np.uint8) * 255,
+            "medium_vegetation": medium.astype(np.uint8) * 255,
+            "low_vegetation": low.astype(np.uint8) * 255,
+            "non_vegetation_artifact": non.astype(np.uint8) * 255,
+        }
+    cleaned = {name: _clean_and_sieve(mask, config) for name, mask in raw_masks.items()}
+    occupied = np.zeros(next(iter(cleaned.values())).shape, bool)
+    exclusive: dict[str, np.ndarray] = {}
+    for name in NDVI_CLASSES:
+        mask = (cleaned[name] > 0) & ~occupied
+        exclusive[name] = mask.astype(np.uint8) * 255
+        occupied |= mask
+    return exclusive
+
+
+def _local_texture(normalized: np.ndarray, config: CandidateConfig) -> np.ndarray:
+    size = _odd_size(config.texture_window)
+    mean = cv2.blur(normalized, (size, size))
+    mean_sq = cv2.blur(normalized * normalized, (size, size))
+    std = np.sqrt(np.maximum(mean_sq - mean * mean, 0.0))
+    lap = np.abs(cv2.Laplacian(normalized, cv2.CV_32F, ksize=3))
+    lap_norm = robust_normalize(lap)
+    return np.clip(0.7 * robust_normalize(std) + 0.3 * lap_norm, 0.0, 1.0)
+
+
+def _contrast_score(normalized: np.ndarray, component: np.ndarray) -> float:
+    if not np.any(component):
+        return 0.0
+    kernel = _kernel(17)
+    dilated = cv2.dilate(component.astype(np.uint8), kernel) > 0
+    ring = dilated & ~component
+    inside = normalized[component]
+    outside = normalized[ring]
+    if inside.size == 0 or outside.size == 0:
+        return 0.0
+    return float(abs(np.mean(inside) - np.mean(outside)))
+
+
+def _candidate_geometry(contour: np.ndarray, geometry: GeometryMode, config: CandidateConfig) -> tuple[str, list[list[int]]]:
+    x, y, w, h = cv2.boundingRect(contour)
+    area = max(1.0, cv2.contourArea(contour))
+    extent = area / max(1, w * h)
+    hull = cv2.convexHull(contour)
+    hull_area = max(1.0, cv2.contourArea(hull))
+    solidity = area / hull_area
+    panel_like = h > w * 1.3 and extent > 0.35 and solidity >= config.geometry_min_solidity * 0.75
+    if geometry == "box" or (geometry == "auto" and panel_like):
+        return "box", [[x, y], [x + w - 1, y], [x + w - 1, y + h - 1], [x, y + h - 1]]
+    simplified = cv2.approxPolyDP(contour, max(0.5, config.simplify_epsilon), True)
+    return "contour", simplified.reshape(-1, 2).astype(int).tolist()
+
+
+def _component_stats(
+    ndvi: np.ndarray,
+    normalized: np.ndarray,
+    texture: np.ndarray,
+    component: np.ndarray,
+    contour: np.ndarray,
+) -> dict[str, float]:
+    x, y, w, h = cv2.boundingRect(contour)
+    values = ndvi[component]
+    if values.size == 0:
+        values = np.array([np.nan], np.float32)
+    area = float(np.count_nonzero(component))
+    perimeter = float(cv2.arcLength(contour, True))
+    hull_area = max(1.0, cv2.contourArea(cv2.convexHull(contour)))
+    contour_area = max(1.0, cv2.contourArea(contour))
+    return {
+        "bbox_x": float(x),
+        "bbox_y": float(y),
+        "bbox_width": float(w),
+        "bbox_height": float(h),
+        "centroid_x": float(x + w / 2.0),
+        "centroid_y": float(y + h / 2.0),
+        "area_pixels": area,
+        "perimeter_pixels": perimeter,
+        "mean_ndvi": float(np.nanmean(values)),
+        "median_ndvi": float(np.nanmedian(values)),
+        "min_ndvi": float(np.nanmin(values)),
+        "max_ndvi": float(np.nanmax(values)),
+        "std_ndvi": float(np.nanstd(values)),
+        "contrast_score": _contrast_score(normalized, component),
+        "aspect_ratio": float(w / max(1, h)),
+        "solidity": float(contour_area / hull_area),
+        "circularity": float((4.0 * np.pi * contour_area) / max(1.0, perimeter * perimeter)),
+        "extent": float(contour_area / max(1, w * h)),
+        "texture_score": float(np.mean(texture[component])) if np.any(component) else 0.0,
+    }
+
+
+def _region_candidates(
+    ndvi: np.ndarray,
+    normalized: np.ndarray,
+    texture: np.ndarray,
+    masks: dict[str, np.ndarray],
+    config: CandidateConfig,
+) -> list[dict[str, Any]]:
+    features: list[dict[str, Any]] = []
+    for ndvi_class, mask in masks.items():
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in contours:
+            if cv2.contourArea(contour) < config.min_area:
+                continue
+            component_mask = np.zeros(mask.shape, np.uint8)
+            cv2.drawContours(component_mask, [contour], -1, 255, -1)
+            component = component_mask > 0
+            stats = _component_stats(ndvi, normalized, texture, component, contour)
+            height, width = mask.shape
+            if stats["area_pixels"] > 0.90 * height * width:
+                continue
+            if stats["contrast_score"] < config.min_contrast and stats["area_pixels"] < config.large_region_area:
+                continue
+            geometry_type, points = _candidate_geometry(contour, config.geometry, config)
+            score = stats["area_pixels"] * (1.0 + stats["contrast_score"] + 0.2 * stats["texture_score"])
+            candidate_type = (
+                "texture_region"
+                if stats["texture_score"] >= max(0.45, config.texture_sensitivity * 3.0)
+                else "broad_ndvi_region"
+            )
+            features.append(
+                {
+                    "candidate_type": candidate_type,
+                    "ndvi_class": ndvi_class,
+                    "geometry_type": geometry_type,
+                    **_integer_bbox_stats(stats),
+                    "line_length": 0.0,
+                    "line_angle_degrees": 0.0,
+                    "total_score": float(score),
+                    "points": points,
+                }
+            )
+    return features
+
+
+def _rasterize_candidates(shape: tuple[int, int], candidates: list[dict[str, Any]]) -> np.ndarray:
+    mask = np.zeros(shape, np.uint8)
+    for candidate in candidates:
+        points = np.array(candidate.get("points", []), np.int32)
+        if points.size == 0 or candidate.get("geometry_type") == "line":
+            continue
+        cv2.fillPoly(mask, [points.reshape(-1, 1, 2)], 255)
+    return mask
+
+
+def _texture_candidates(
+    ndvi: np.ndarray,
+    normalized: np.ndarray,
+    texture: np.ndarray,
+    masks: dict[str, np.ndarray],
+    broad_candidates: list[dict[str, Any]],
+    config: CandidateConfig,
+) -> list[dict[str, Any]]:
+    candidate_zone = (masks["medium_vegetation"] > 0) | (masks["low_vegetation"] > 0)
+    occupied = _rasterize_candidates(normalized.shape, broad_candidates) > 0
+    texture_mask = (texture >= config.texture_sensitivity) & candidate_zone
+    clean = _clean_and_sieve(texture_mask.astype(np.uint8) * 255, config)
+    contours, _ = cv2.findContours(clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    features: list[dict[str, Any]] = []
+    for contour in contours:
+        if cv2.contourArea(contour) < config.min_area:
+            continue
+        component_mask = np.zeros(clean.shape, np.uint8)
+        cv2.drawContours(component_mask, [contour], -1, 255, -1)
+        component = component_mask > 0
+        overlap = np.count_nonzero(component & occupied) / max(1, np.count_nonzero(component))
+        if overlap > 0.35:
+            continue
+        stats = _component_stats(ndvi, normalized, texture, component, contour)
+        if stats["texture_score"] < config.texture_sensitivity:
+            continue
+        geometry_type, points = _candidate_geometry(contour, "contour", config)
+        score = stats["area_pixels"] * (1.0 + stats["texture_score"] + stats["contrast_score"])
+        features.append(
+            {
+                "candidate_type": "texture_region",
+                "ndvi_class": "medium_vegetation",
+                "geometry_type": geometry_type,
+                **_integer_bbox_stats(stats),
+                "line_length": 0.0,
+                "line_angle_degrees": 0.0,
+                "total_score": float(score),
+                "points": points,
+            }
+        )
+    return features
+
+
+def _integer_bbox_stats(stats: dict[str, float]) -> dict[str, float | int]:
+    output: dict[str, float | int] = {}
+    for key, value in stats.items():
+        if key in {"bbox_x", "bbox_y", "bbox_width", "bbox_height", "area_pixels"}:
+            output[key] = int(round(value))
+        else:
+            output[key] = float(value)
+    return output
+
+
+def detect_candidates(
+    source_or_ndvi: NdviSource | np.ndarray,
+    config: CandidateConfig | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, np.ndarray]]:
+    config = config or CandidateConfig()
+    source = source_or_ndvi if isinstance(source_or_ndvi, NdviSource) else None
+    ndvi = source.ndvi if source is not None else np.asarray(source_or_ndvi, np.float32)
+    normalized = robust_normalize(ndvi, config.percentile_low, config.percentile_high)
+    texture = _local_texture(normalized, config)
+    masks = build_class_masks(source if source is not None else ndvi, config)
+    features = _region_candidates(ndvi, normalized, texture, masks, config)
+    features.extend(_texture_candidates(ndvi, normalized, texture, masks, features, config))
+    features.sort(key=lambda item: item["total_score"], reverse=True)
+    for index, feature in enumerate(features[: config.top_n], start=1):
+        feature["id"] = index
+    return features[: config.top_n], masks
+
+
+def write_candidates_csv(path: Path, candidates: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
+        writer.writeheader()
+        for candidate in candidates:
+            row = {field: candidate.get(field, "") for field in CSV_FIELDS}
+            row["points"] = json.dumps(candidate.get("points", []))
+            writer.writerow(row)
+
+
+def write_candidate_mask(path: Path, shape: tuple[int, int], candidates: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mask = np.zeros(shape, np.uint16)
+    for candidate in candidates:
+        points = np.array(candidate.get("points", []), np.int32)
+        if points.size == 0:
+            continue
+        value = int(candidate["id"])
+        if candidate["geometry_type"] == "line":
+            cv2.line(mask, tuple(points[0]), tuple(points[-1]), value, 5)
+        elif candidate["geometry_type"] == "box":
+            cv2.fillPoly(mask, [points.reshape(-1, 1, 2)], value)
+        else:
+            cv2.fillPoly(mask, [points.reshape(-1, 1, 2)], value)
+    cv2.imwrite(str(path), mask)
+
+
+def _draw_points(overlay: np.ndarray, candidate: dict[str, Any], thickness: int) -> None:
+    points = candidate.get("points", [])
+    if len(points) < 2:
+        return
+    color = CANDIDATE_COLORS_BGR[str(candidate["candidate_type"])]
+    pts = np.array(points, np.int32).reshape(-1, 1, 2)
+    if candidate["geometry_type"] == "line":
+        cv2.polylines(overlay, [pts], False, (0, 0, 0), thickness + 3, cv2.LINE_AA)
+        cv2.polylines(overlay, [pts], False, color, thickness, cv2.LINE_AA)
+    else:
+        cv2.polylines(overlay, [pts], True, (0, 0, 0), thickness + 3, cv2.LINE_AA)
+        cv2.polylines(overlay, [pts], True, color, thickness, cv2.LINE_AA)
+
+
+def _draw_candidate_label(overlay: np.ndarray, candidate: dict[str, Any]) -> None:
+    label = str(candidate.get("id", ""))
+    if not label:
+        return
+    x = int(round(float(candidate.get("centroid_x", candidate.get("bbox_x", 0)))))
+    y = int(round(float(candidate.get("centroid_y", candidate.get("bbox_y", 0)))))
+    x = int(np.clip(x, 8, overlay.shape[1] - 8))
+    y = int(np.clip(y, 20, overlay.shape[0] - 8))
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.75
+    thickness = 2
+    (text_width, text_height), baseline = cv2.getTextSize(label, font, scale, thickness)
+    pad = 5
+    top_left = (x - pad, y - text_height - pad)
+    bottom_right = (x + text_width + pad, y + baseline + pad)
+    cv2.rectangle(overlay, top_left, bottom_right, (0, 0, 0), -1, cv2.LINE_AA)
+    cv2.putText(overlay, label, (x, y), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+
+def _put_panel_text(
+    panel: np.ndarray,
+    text: str,
+    origin: tuple[int, int],
+    scale: float = 0.55,
+    color: tuple[int, int, int] = (30, 30, 30),
+    thickness: int = 1,
+) -> None:
+    cv2.putText(panel, text, origin, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
+
+
+def _draw_wrapped_text(panel: np.ndarray, text: str, x: int, y: int, max_width: int) -> int:
+    words = text.split()
+    line = ""
+    for word in words:
+        trial = word if not line else f"{line} {word}"
+        width = cv2.getTextSize(trial, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)[0][0]
+        if width <= max_width:
+            line = trial
+            continue
+        if line:
+            _put_panel_text(panel, line, (x, y), 0.48)
+            y += 18
+        line = word
+    if line:
+        _put_panel_text(panel, line, (x, y), 0.48)
+        y += 18
+    return y
+
+
+def _draw_ndvi_legend(panel: np.ndarray, x: int, y: int, height: int = 210) -> int:
+    _put_panel_text(panel, "NDVI false color", (x, y), 0.62, thickness=2)
+    y += 18
+    height = max(30, min(height, panel.shape[0] - y - 12))
+    values = np.linspace(0.7, -0.2, height, dtype=np.float32).reshape(height, 1)
+    bar = cv2.cvtColor(ndvi_false_color(values, -0.2, 0.7), cv2.COLOR_RGB2BGR)
+    bar = np.repeat(bar, 24, axis=1)
+    panel[y : y + height, x : x + 24] = bar
+    cv2.rectangle(panel, (x, y), (x + 24, y + height), (40, 40, 40), 1)
+    for value, label in ((0.7, "0.70 high"), (0.25, "0.25 mid"), (-0.2, "-0.20 low")):
+        tick_y = int(y + (0.7 - value) / 0.9 * height)
+        cv2.line(panel, (x + 26, tick_y), (x + 36, tick_y), (40, 40, 40), 1)
+        _put_panel_text(panel, label, (x + 42, tick_y + 5), 0.48)
+    return y + height + 34
+
+
+def _draw_class_legend(panel: np.ndarray, candidates: list[dict[str, Any]], x: int, y: int, width: int) -> int:
+    _put_panel_text(panel, "Candidate classes", (x, y), 0.62, thickness=2)
+    y += 24
+    for class_name in NDVI_CLASSES:
+        color = NDVI_CLASS_COLORS_BGR[class_name]
+        cv2.rectangle(panel, (x, y - 12), (x + 18, y + 6), color, -1, cv2.LINE_AA)
+        cv2.rectangle(panel, (x, y - 12), (x + 18, y + 6), (40, 40, 40), 1, cv2.LINE_AA)
+        y = _draw_wrapped_text(panel, NDVI_CLASS_LABELS[class_name], x + 28, y + 2, width - 36)
+        y += 8
+    y += 8
+    _put_panel_text(panel, "Candidate IDs", (x, y), 0.62, thickness=2)
+    y += 24
+    for candidate in candidates[:18]:
+        class_name = str(candidate.get("ndvi_class", ""))
+        label = NDVI_CLASS_LABELS.get(class_name, class_name)
+        text = f"{candidate.get('id')}: {label}"
+        y = _draw_wrapped_text(panel, text, x, y, width)
+        y += 4
+        if y > panel.shape[0] - 24:
+            _put_panel_text(panel, "...", (x, y), 0.55)
+            break
+    return y
+
+
+def _append_legend_panel(overlay: np.ndarray, candidates: list[dict[str, Any]]) -> np.ndarray:
+    panel_width = 320
+    gap = 12
+    height = overlay.shape[0]
+    panel = np.full((height, panel_width, 3), 245, np.uint8)
+    cv2.rectangle(panel, (0, 0), (panel_width - 1, height - 1), (190, 190, 190), 1)
+    y = _draw_ndvi_legend(panel, 18, 28)
+    _draw_class_legend(panel, candidates, 18, y, panel_width - 36)
+    spacer = np.full((height, gap, 3), 255, np.uint8)
+    return np.hstack([overlay, spacer, panel])
+
+
+def write_candidate_overlay(
+    path: Path,
+    background: np.ndarray,
+    candidates: list[dict[str, Any]],
+    config: CandidateConfig,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    overlay = np.asarray(background).copy()
+    thickness = max(1, int(config.box_thickness))
+    for candidate in candidates:
+        _draw_points(overlay, candidate, thickness)
+    for candidate in candidates:
+        _draw_candidate_label(overlay, candidate)
+    overlay = _append_legend_panel(overlay, candidates)
+    cv2.imwrite(str(path), overlay)
+
+
+def summarize_candidates(
+    source: NdviSource,
+    output_dir: Path,
+    config: CandidateConfig,
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    counts_by_type: dict[str, int] = {}
+    counts_by_class: dict[str, int] = {}
+    for candidate in candidates:
+        counts_by_type[str(candidate["candidate_type"])] = counts_by_type.get(str(candidate["candidate_type"]), 0) + 1
+        counts_by_class[str(candidate["ndvi_class"])] = counts_by_class.get(str(candidate["ndvi_class"]), 0) + 1
+    return {
+        "input_path": str(source.input_path.resolve()),
+        "ndvi_path": str(source.ndvi_path.resolve()) if source.ndvi_path is not None else None,
+        "output_dir": str(output_dir.resolve()),
+        "physical_ndvi": source.physical_ndvi,
+        "crop_margins": source.crop_margins,
+        "original_shape": source.original_shape,
+        "cropped_shape": source.ndvi.shape,
+        "candidate_colors": CANDIDATE_COLORS_RGB,
+        "parameters": asdict(config),
+        "candidate_count": len(candidates),
+        "counts_by_type": counts_by_type,
+        "counts_by_class": counts_by_class,
+        "top_candidates": candidates,
+    }
