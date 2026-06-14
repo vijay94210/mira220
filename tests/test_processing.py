@@ -2,6 +2,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 import tifffile
 
 from mira220.cli import (
@@ -9,8 +10,10 @@ from mira220.cli import (
     NDVI_PRODUCT_SENTINELS,
     PROCESSED_SENTINELS,
     _capture_output_name,
+    _collage_entries,
     _is_processed_output,
     _process_run,
+    _write_collage,
     _write_candidates_for_output,
 )
 from mira220.correction import apply_model, apply_scene_correction, load_yaml
@@ -204,6 +207,47 @@ def test_process_run_ndvi_product_set_writes_candidates_next_to_ndvi(tmp_path: P
     assert len(summary["candidate_generated"]) == 1
 
 
+def test_process_run_skips_excessively_saturated_raw(tmp_path: Path, monkeypatch) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    raw_path = raw_dir / "1600x1400_Bit12_RGB-IR_RGB-IRMod(GRIG)_2026-06-07_12_00_00.raw"
+    raw = np.zeros(100, np.uint16)
+    raw[:6] = 4095
+    raw_path.write_bytes(raw.tobytes())
+    run_dir = tmp_path / "runs" / "survey"
+
+    monkeypatch.setattr("mira220.cli.is_compatible_raw", lambda path: True)
+    monkeypatch.setattr(
+        "mira220.cli.load_yaml",
+        lambda path: {
+            "preprocessing": {"sensor_bit_depth": 12},
+            "display": {"ndvi_min": -0.2, "ndvi_max": 0.7},
+        },
+    )
+    monkeypatch.setattr(
+        "mira220.cli.run_openrgbir",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("saturated RAW should be skipped")),
+    )
+
+    summary = _process_run(
+        raw_dir,
+        tmp_path / "model.yaml",
+        run_dir,
+        False,
+        tmp_path,
+        tmp_path,
+        False,
+    )
+
+    assert summary["processed"] == []
+    assert len(summary["skipped"]) == 1
+    skipped = summary["skipped"][0]
+    assert skipped["reason"] == "excessive RAW saturation"
+    assert skipped["saturated_fraction"] == pytest.approx(0.06)
+    assert skipped["threshold_fraction"] == pytest.approx(0.05)
+    assert skipped["sensor_max"] == 4095
+
+
 def test_process_run_generates_missing_candidates_for_already_processed_capture(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -252,6 +296,26 @@ def test_process_run_generates_missing_candidates_for_already_processed_capture(
     assert len(summary["skipped"]) == 1
     assert len(summary["candidate_generated"]) == 1
     assert summary["skipped"][0]["candidate_result"]["status"] == "generated"
+
+
+def test_collage_groups_processed_images_by_capture_date(tmp_path: Path) -> None:
+    root = tmp_path / "runs"
+    first = root / "survey" / "2026-06-06_20_17_03"
+    second = root / "survey" / "2026-06-06_20_20_00"
+    third = root / "survey" / "2026-06-07_09_15_00"
+    for index, capture in enumerate((first, second, third), start=1):
+        capture.mkdir(parents=True)
+        image = np.full((24, 32, 3), index * 50, np.uint8)
+        cv2.imwrite(str(capture / "ndvi_false_color_crop.png"), image)
+
+    grouped = _collage_entries(root, "ndvi_false_color_crop.png")
+
+    assert sorted(grouped) == ["2026-06-06", "2026-06-07"]
+    assert len(grouped["2026-06-06"]) == 2
+    output = tmp_path / "collages" / "2026-06-06_ndvi_false_color_crop_collage.png"
+    _write_collage(output, grouped["2026-06-06"], 64, 48, 2)
+    assert output.is_file()
+    assert cv2.imread(str(output)).shape[0] > 48
 
 
 def test_scene_correction_uses_channel_level_features() -> None:

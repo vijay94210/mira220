@@ -14,7 +14,9 @@ from .imaging import (
     NDVI_CROP_MARGINS,
     crop_valid_region,
     crop_valid_region_or_full,
+    detect_marker,
     ndvi_false_color,
+    patch_polygons,
 )
 
 
@@ -116,6 +118,12 @@ class NdviSource:
     crop_margins: tuple[int, int, int, int] | None
     original_shape: tuple[int, int]
     source_bgr: np.ndarray | None = None
+
+
+@dataclass(frozen=True)
+class TargetExclusion:
+    mask: np.ndarray | None
+    metadata: dict[str, Any]
 
 
 def _read_ndvi_tiff(path: Path) -> np.ndarray:
@@ -294,6 +302,18 @@ def _clean_and_sieve(mask: np.ndarray, config: CandidateConfig) -> np.ndarray:
     return sieved
 
 
+def _clean_class_mask(class_name: str, mask: np.ndarray, config: CandidateConfig) -> np.ndarray:
+    if class_name not in {"high_vegetation", "medium_vegetation"}:
+        return _clean_and_sieve(mask, config)
+    class_config = CandidateConfig(
+        **{
+            **asdict(config),
+            "morph_close": min(config.morph_close, 9),
+        }
+    )
+    return _clean_and_sieve(mask, class_config)
+
+
 def build_class_masks(
     source_or_ndvi: NdviSource | np.ndarray,
     config: CandidateConfig,
@@ -322,7 +342,7 @@ def build_class_masks(
             "low_vegetation": low.astype(np.uint8) * 255,
             "non_vegetation_artifact": non.astype(np.uint8) * 255,
         }
-    cleaned = {name: _clean_and_sieve(mask, config) for name, mask in raw_masks.items()}
+    cleaned = {name: _clean_class_mask(name, mask, config) for name, mask in raw_masks.items()}
     occupied = np.zeros(next(iter(cleaned.values())).shape, bool)
     exclusive: dict[str, np.ndarray] = {}
     for name in NDVI_CLASSES:
@@ -427,6 +447,8 @@ def _region_candidates(
             height, width = mask.shape
             if stats["area_pixels"] > 0.90 * height * width:
                 continue
+            if _is_artifact_candidate(stats, mask.shape, ndvi_class):
+                continue
             if stats["contrast_score"] < config.min_contrast and stats["area_pixels"] < config.large_region_area:
                 continue
             geometry_type, points = _candidate_geometry(contour, config.geometry, config)
@@ -472,7 +494,8 @@ def _texture_candidates(
     candidate_zone = (masks["medium_vegetation"] > 0) | (masks["low_vegetation"] > 0)
     occupied = _rasterize_candidates(normalized.shape, broad_candidates) > 0
     texture_mask = (texture >= config.texture_sensitivity) & candidate_zone
-    clean = _clean_and_sieve(texture_mask.astype(np.uint8) * 255, config)
+    texture_config = CandidateConfig(**{**asdict(config), "morph_close": min(config.morph_close, 9)})
+    clean = _clean_and_sieve(texture_mask.astype(np.uint8) * 255, texture_config)
     contours, _ = cv2.findContours(clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     features: list[dict[str, Any]] = []
     for contour in contours:
@@ -485,6 +508,8 @@ def _texture_candidates(
         if overlap > 0.35:
             continue
         stats = _component_stats(ndvi, normalized, texture, component, contour)
+        if _is_artifact_candidate(stats, clean.shape, "medium_vegetation"):
+            continue
         if stats["texture_score"] < config.texture_sensitivity:
             continue
         geometry_type, points = _candidate_geometry(contour, "contour", config)
@@ -514,9 +539,166 @@ def _integer_bbox_stats(stats: dict[str, float]) -> dict[str, float | int]:
     return output
 
 
+def _crop_mask_to_source(mask: np.ndarray, source: NdviSource) -> np.ndarray:
+    if source.crop_margins is None:
+        if mask.shape != source.ndvi.shape:
+            return cv2.resize(mask, (source.ndvi.shape[1], source.ndvi.shape[0]), interpolation=cv2.INTER_NEAREST)
+        return mask
+    left, top, right, bottom = source.crop_margins
+    height, width = mask.shape
+    cropped = mask[top : height - bottom, left : width - right]
+    if cropped.shape != source.ndvi.shape:
+        return cv2.resize(cropped, (source.ndvi.shape[1], source.ndvi.shape[0]), interpolation=cv2.INTER_NEAREST)
+    return cropped
+
+
+def _candidate_overlap_fraction(candidate: dict[str, Any], mask: np.ndarray) -> float:
+    candidate_mask = _rasterize_candidates(mask.shape, [candidate]) > 0
+    area = int(np.count_nonzero(candidate_mask))
+    if area == 0:
+        return 0.0
+    return float(np.count_nonzero(candidate_mask & (mask > 0)) / area)
+
+
+def _candidate_exclusion_bbox_fraction(candidate: dict[str, Any], mask: np.ndarray) -> float:
+    x = int(candidate.get("bbox_x", 0))
+    y = int(candidate.get("bbox_y", 0))
+    w = int(candidate.get("bbox_width", 0))
+    h = int(candidate.get("bbox_height", 0))
+    if w <= 0 or h <= 0:
+        return 0.0
+    x0 = int(np.clip(x, 0, mask.shape[1]))
+    y0 = int(np.clip(y, 0, mask.shape[0]))
+    x1 = int(np.clip(x + w, 0, mask.shape[1]))
+    y1 = int(np.clip(y + h, 0, mask.shape[0]))
+    area = max(1, int(candidate.get("area_pixels", 0)))
+    return float(np.count_nonzero(mask[y0:y1, x0:x1] > 0) / area)
+
+
+def _apply_exclusion_mask(
+    masks: dict[str, np.ndarray],
+    exclusion_mask: np.ndarray | None,
+) -> dict[str, np.ndarray]:
+    if exclusion_mask is None:
+        return masks
+    keep = exclusion_mask == 0
+    non_high_keep = keep.copy()
+    rows, cols = np.where(exclusion_mask > 0)
+    if rows.size and cols.size:
+        pad = 8
+        x0 = max(0, int(cols.min()) - pad)
+        x1 = min(exclusion_mask.shape[1], int(cols.max()) + pad + 1)
+        non_high_keep[:, x0:x1] = False
+    return {
+        name: (
+            (mask > 0)
+            & (non_high_keep if name in {"medium_vegetation", "non_vegetation_artifact"} else keep)
+        ).astype(np.uint8)
+        * 255
+        for name, mask in masks.items()
+    }
+
+
+def _filter_excluded_candidates(
+    candidates: list[dict[str, Any]],
+    exclusion_mask: np.ndarray | None,
+    overlap_threshold: float = 0.25,
+) -> list[dict[str, Any]]:
+    if exclusion_mask is None:
+        return candidates
+    return [
+        candidate
+        for candidate in candidates
+        if _candidate_overlap_fraction(candidate, exclusion_mask) <= overlap_threshold
+        and _candidate_exclusion_bbox_fraction(candidate, exclusion_mask) <= 0.50
+    ]
+
+
+def _is_artifact_candidate(stats: dict[str, float], shape: tuple[int, int], ndvi_class: str) -> bool:
+    height, width = shape
+    x = int(round(stats["bbox_x"]))
+    y = int(round(stats["bbox_y"]))
+    w = int(round(stats["bbox_width"]))
+    h = int(round(stats["bbox_height"]))
+    aspect_ratio = float(stats["aspect_ratio"])
+    touches_frame = x <= 1 or y <= 1 or x + w >= width - 1 or y + h >= height - 1
+    edge_margin = max(12, int(0.05 * min(height, width)))
+    near_frame = x <= edge_margin or y <= edge_margin or x + w >= width - edge_margin or y + h >= height - edge_margin
+    skinny = aspect_ratio >= 10.0 or aspect_ratio <= 0.10
+    frame_spanning = w >= 0.95 * width and h >= 0.95 * height
+    edge_strip = near_frame and ndvi_class != "high_vegetation" and (aspect_ratio >= 4.0 or aspect_ratio <= 0.33)
+    if ndvi_class != "high_vegetation" and frame_spanning:
+        return True
+    if edge_strip and stats["area_pixels"] < 0.20 * height * width:
+        return True
+    if skinny and stats["area_pixels"] < 0.20 * height * width:
+        return True
+    if touches_frame and skinny and stats["extent"] > 0.25:
+        return True
+    board_like = (
+        ndvi_class in {"low_vegetation", "non_vegetation_artifact"}
+        and stats["extent"] >= 0.78
+        and stats["solidity"] >= 0.92
+        and 0.35 <= aspect_ratio <= 3.0
+        and stats["area_pixels"] < 0.20 * height * width
+    )
+    return board_like
+
+
+def target_exclusion_from_source(
+    source: NdviSource,
+    target: dict[str, Any] | None,
+    padding: int = 24,
+) -> TargetExclusion:
+    metadata: dict[str, Any] = {
+        "enabled": target is not None,
+        "detected": False,
+        "marker_id": int(target["marker_id"]) if target is not None and "marker_id" in target else None,
+        "reason": None,
+    }
+    if target is None:
+        metadata["reason"] = "target config not provided"
+        return TargetExclusion(None, metadata)
+    if not source.input_path.is_dir():
+        metadata["reason"] = "input is not a processed output directory"
+        return TargetExclusion(None, metadata)
+    rgn_path = source.input_path / "rgn_reflectance.tiff"
+    if not rgn_path.is_file():
+        metadata["reason"] = "rgn_reflectance.tiff not found"
+        return TargetExclusion(None, metadata)
+    try:
+        rgn = tifffile.imread(rgn_path).astype(np.float32)
+        marker = detect_marker(rgn, int(target["marker_id"]), target["dictionary"])
+        polygons = patch_polygons(marker, target)
+    except Exception as exc:
+        metadata["reason"] = str(exc)
+        return TargetExclusion(None, metadata)
+
+    full_mask = np.zeros(rgn.shape[:2], np.uint8)
+    cv2.fillConvexPoly(full_mask, np.round(marker).astype(np.int32), 255)
+    for polygon in polygons:
+        cv2.fillConvexPoly(full_mask, np.round(polygon).astype(np.int32), 255)
+    all_points = np.vstack([marker, *polygons])
+    hull = cv2.convexHull(np.round(all_points).astype(np.int32))
+    cv2.fillConvexPoly(full_mask, hull, 255)
+    if padding > 0:
+        full_mask = cv2.dilate(full_mask, _kernel(padding))
+    mask = _crop_mask_to_source(full_mask, source)
+    metadata.update(
+        {
+            "detected": True,
+            "reason": None,
+            "excluded_pixels": int(np.count_nonzero(mask)),
+            "padding_pixels": int(padding),
+        }
+    )
+    return TargetExclusion(mask, metadata)
+
+
 def detect_candidates(
     source_or_ndvi: NdviSource | np.ndarray,
     config: CandidateConfig | None = None,
+    exclusion_mask: np.ndarray | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, np.ndarray]]:
     config = config or CandidateConfig()
     source = source_or_ndvi if isinstance(source_or_ndvi, NdviSource) else None
@@ -524,8 +706,10 @@ def detect_candidates(
     normalized = robust_normalize(ndvi, config.percentile_low, config.percentile_high)
     texture = _local_texture(normalized, config)
     masks = build_class_masks(source if source is not None else ndvi, config)
+    masks = _apply_exclusion_mask(masks, exclusion_mask)
     features = _region_candidates(ndvi, normalized, texture, masks, config)
     features.extend(_texture_candidates(ndvi, normalized, texture, masks, features, config))
+    features = _filter_excluded_candidates(features, exclusion_mask)
     features.sort(key=lambda item: item["total_score"], reverse=True)
     for index, feature in enumerate(features[: config.top_n], start=1):
         feature["id"] = index
@@ -697,6 +881,7 @@ def summarize_candidates(
     output_dir: Path,
     config: CandidateConfig,
     candidates: list[dict[str, Any]],
+    target_exclusion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     counts_by_type: dict[str, int] = {}
     counts_by_class: dict[str, int] = {}
@@ -716,5 +901,6 @@ def summarize_candidates(
         "candidate_count": len(candidates),
         "counts_by_type": counts_by_type,
         "counts_by_class": counts_by_class,
+        "target_exclusion": target_exclusion,
         "top_candidates": candidates,
     }

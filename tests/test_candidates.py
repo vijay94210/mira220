@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 import tifffile
 
+import mira220.candidates as candidate_module
 from mira220.candidates import (
     CSV_FIELDS,
     CandidateConfig,
@@ -15,6 +16,8 @@ from mira220.candidates import (
     detect_candidates,
     load_ndvi_source,
     robust_normalize,
+    summarize_candidates,
+    target_exclusion_from_source,
     write_candidate_mask,
     write_candidate_overlay,
     write_candidates_csv,
@@ -130,6 +133,21 @@ def test_texture_region_detected_separately() -> None:
     assert any(candidate["candidate_type"] == "texture_region" for candidate in candidates)
 
 
+def test_exclusion_mask_removes_target_candidate_but_keeps_vegetation() -> None:
+    ndvi = _scene((180, 240), 0.04)
+    ndvi[30:120, 30:105] = 0.65
+    ndvi[40:105, 150:215] = 0.65
+    exclusion = np.zeros(ndvi.shape, np.uint8)
+    exclusion[36:112, 142:222] = 255
+    candidates, _ = detect_candidates(
+        ndvi,
+        CandidateConfig(crop=False, min_area=1000, morph_open=3, morph_close=9),
+        exclusion_mask=exclusion,
+    )
+    assert candidates
+    assert all(candidate["centroid_x"] < 130 for candidate in candidates)
+
+
 def test_linear_artifacts_are_not_emitted() -> None:
     ndvi = _scene((180, 240), 0.25)
     cv2.line(ndvi, (20, 150), (220, 30), 0.75, 3)
@@ -227,6 +245,53 @@ def test_candidate_overlay_adds_id_labels_and_legends(tmp_path: Path) -> None:
     assert overlay.shape[1] > background.shape[1]
     assert np.any(overlay[:, background.shape[1] :, :] != 255)
     assert np.any(overlay[15:40, 15:40, :] > 0)
+
+
+def test_target_exclusion_metadata_reports_detected_marker(
+    tmp_path: Path, monkeypatch
+) -> None:
+    output = tmp_path / "capture"
+    output.mkdir()
+    ndvi = np.full((80, 100), 0.25, np.float32)
+    tifffile.imwrite(output / "ndvi.tiff", ndvi)
+    tifffile.imwrite(output / "rgn_reflectance.tiff", np.dstack([ndvi, ndvi, ndvi]))
+    target = {"marker_id": 830, "dictionary": "DICT_4X4_1000", "patches": [{"name": "P1"}]}
+    marker = np.array([[20, 20], [40, 20], [40, 40], [20, 40]], np.float32)
+    patch = np.array([[50, 20], [70, 20], [70, 40], [50, 40]], np.float32)
+    monkeypatch.setattr(candidate_module, "detect_marker", lambda image, marker_id, dictionary: marker)
+    monkeypatch.setattr(candidate_module, "patch_polygons", lambda corners, target_config: [patch])
+
+    source = load_ndvi_source(output, crop=False)
+    exclusion = target_exclusion_from_source(source, target, padding=0)
+    summary = summarize_candidates(source, output, CandidateConfig(crop=False), [], exclusion.metadata)
+
+    assert exclusion.mask is not None
+    assert exclusion.metadata["detected"] is True
+    assert exclusion.metadata["marker_id"] == 830
+    assert summary["target_exclusion"]["excluded_pixels"] > 0
+
+
+def test_target_exclusion_metadata_reports_marker_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    output = tmp_path / "capture"
+    output.mkdir()
+    ndvi = np.full((80, 100), 0.25, np.float32)
+    tifffile.imwrite(output / "ndvi.tiff", ndvi)
+    tifffile.imwrite(output / "rgn_reflectance.tiff", np.dstack([ndvi, ndvi, ndvi]))
+    target = {"marker_id": 830, "dictionary": "DICT_4X4_1000", "patches": []}
+    monkeypatch.setattr(
+        candidate_module,
+        "detect_marker",
+        lambda image, marker_id, dictionary: (_ for _ in ()).throw(RuntimeError("marker missing")),
+    )
+
+    source = load_ndvi_source(output, crop=False)
+    exclusion = target_exclusion_from_source(source, target)
+
+    assert exclusion.mask is None
+    assert exclusion.metadata["detected"] is False
+    assert exclusion.metadata["reason"] == "marker missing"
 
 
 def test_cli_detect_candidates_writes_all_outputs(tmp_path: Path) -> None:

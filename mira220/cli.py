@@ -25,6 +25,7 @@ from .candidates import (
     detect_candidates,
     load_ndvi_source,
     summarize_candidates,
+    target_exclusion_from_source,
     write_candidate_overlay,
     write_candidate_mask,
     write_candidates_csv,
@@ -63,6 +64,9 @@ CANDIDATE_SENTINELS = (
     "candidate_summary.json",
 )
 RAW_TIMESTAMP_RE = re.compile(r"(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})_(?P<hour>\d{2})_(?P<minute>\d{2})_(?P<second>\d{2})")
+RAW_SATURATION_THRESHOLD_FRACTION = 0.05
+COLLAGE_BACKGROUND = (245, 245, 245)
+COLLAGE_TEXT = (30, 30, 30)
 
 
 def _add_shared_paths(parser: argparse.ArgumentParser) -> None:
@@ -82,6 +86,15 @@ def _capture_output_name(raw_path: Path) -> str:
     )
 
 
+def _capture_date(path: Path) -> str | None:
+    for part in (path.stem, *reversed(path.parts)):
+        match = RAW_TIMESTAMP_RE.search(part)
+        if match is not None:
+            parts = match.groupdict()
+            return f"{parts['year']}-{parts['month']}-{parts['day']}"
+    return None
+
+
 def _processed_sentinels(product_set: str) -> tuple[str, ...]:
     if product_set == "full":
         return PROCESSED_SENTINELS
@@ -98,20 +111,38 @@ def _has_candidate_outputs(output_dir: Path) -> bool:
     return all((output_dir / name).is_file() for name in CANDIDATE_SENTINELS)
 
 
-def _write_candidates_for_output(output_dir: Path, force: bool = False) -> dict:
+def _raw_saturation_summary(
+    raw_path: Path,
+    sensor_bit_depth: int,
+    threshold_fraction: float = RAW_SATURATION_THRESHOLD_FRACTION,
+) -> dict:
+    sensor_max = (1 << int(sensor_bit_depth)) - 1
+    raw = np.fromfile(raw_path, dtype=np.uint16)
+    saturated_fraction = float(np.mean(raw == sensor_max)) if raw.size else 0.0
+    return {
+        "saturated_fraction": saturated_fraction,
+        "threshold_fraction": float(threshold_fraction),
+        "sensor_max": int(sensor_max),
+        "excessive": saturated_fraction > threshold_fraction,
+    }
+
+
+def _write_candidates_for_output(output_dir: Path, force: bool = False, target: dict | None = None) -> dict:
     if _has_candidate_outputs(output_dir) and not force:
         return {"output_directory": str(output_dir.resolve()), "status": "skipped", "reason": "already exists"}
     source = load_ndvi_source(output_dir)
-    candidates, _ = detect_candidates(source)
+    exclusion = target_exclusion_from_source(source, target)
+    candidates, _ = detect_candidates(source, exclusion_mask=exclusion.mask)
     write_candidate_overlay(output_dir / "candidate_overlay.png", source.background, candidates, CandidateConfig())
     write_candidate_mask(output_dir / "candidate_mask.png", source.ndvi.shape, candidates)
     write_candidates_csv(output_dir / "candidates.csv", candidates)
-    summary = summarize_candidates(source, output_dir, CandidateConfig(), candidates)
+    summary = summarize_candidates(source, output_dir, CandidateConfig(), candidates, exclusion.metadata)
     (output_dir / "candidate_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return {
         "output_directory": str(output_dir.resolve()),
         "status": "generated",
         "candidate_count": len(candidates),
+        "target_exclusion": exclusion.metadata,
     }
 
 
@@ -154,8 +185,10 @@ def _process_run(
     product_set: str = "full",
     detect_candidates_flag: bool = False,
     force_candidates: bool = False,
+    target_config: Path = DEFAULT_TARGET_PATH,
 ) -> dict:
     model = load_yaml(model_path)
+    target = load_yaml(target_config)
     pattern = "**/*.raw" if recursive else "*.raw"
     raw_paths = sorted(raw_dir.glob(pattern))
     if not raw_paths:
@@ -176,7 +209,7 @@ def _process_run(
             candidate_result = None
             if detect_candidates_flag:
                 try:
-                    candidate_result = _write_candidates_for_output(output_dir, force=force_candidates)
+                    candidate_result = _write_candidates_for_output(output_dir, force=force_candidates, target=target)
                     if candidate_result["status"] == "generated":
                         candidate_generated.append(candidate_result)
                     else:
@@ -197,6 +230,24 @@ def _process_run(
                 }
             )
             print(f"Skipping already processed RAW: {raw_path.name} -> {output_dir}")
+            continue
+        saturation = _raw_saturation_summary(raw_path, model["preprocessing"]["sensor_bit_depth"])
+        if saturation["excessive"]:
+            skipped.append(
+                {
+                    "path": str(raw_path.resolve()),
+                    "output_directory": str(output_dir.resolve()),
+                    "reason": "excessive RAW saturation",
+                    "saturated_fraction": saturation["saturated_fraction"],
+                    "threshold_fraction": saturation["threshold_fraction"],
+                    "sensor_max": saturation["sensor_max"],
+                }
+            )
+            print(
+                "Skipping saturated RAW: "
+                f"{raw_path.name} ({saturation['saturated_fraction']:.3%} >= "
+                f"{saturation['threshold_fraction']:.3%})"
+            )
             continue
         raw_rgb, raw_ir = run_openrgbir(
             raw_path,
@@ -222,7 +273,7 @@ def _process_run(
         candidate_result = None
         if detect_candidates_flag:
             try:
-                candidate_result = _write_candidates_for_output(output_dir, force=True)
+                candidate_result = _write_candidates_for_output(output_dir, force=True, target=target)
                 candidate_generated.append(candidate_result)
             except Exception as exc:  # pragma: no cover - defensive summary path
                 candidate_result = {
@@ -268,6 +319,7 @@ def _process(args: argparse.Namespace) -> int:
         product_set=args.product_set,
         detect_candidates_flag=args.detect_candidates,
         force_candidates=args.force_candidates,
+        target_config=args.target_config,
     )
     return 0
 
@@ -390,15 +442,102 @@ def _detect_candidates(args: argparse.Namespace) -> int:
         show_class_colors=args.show_class_colors,
     )
     source = load_ndvi_source(args.image_or_output_dir, crop=config.crop)
-    candidates, _ = detect_candidates(source, config)
+    target = load_yaml(args.target_config)
+    exclusion = target_exclusion_from_source(source, target)
+    candidates, _ = detect_candidates(source, config, exclusion_mask=exclusion.mask)
     output_dir = args.output_dir or _candidate_output_dir(args.image_or_output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     write_candidate_overlay(output_dir / "candidate_overlay.png", source.background, candidates, config)
     write_candidate_mask(output_dir / "candidate_mask.png", source.ndvi.shape, candidates)
     write_candidates_csv(output_dir / "candidates.csv", candidates)
-    summary = summarize_candidates(source, output_dir, config, candidates)
+    summary = summarize_candidates(source, output_dir, config, candidates, exclusion.metadata)
     (output_dir / "candidate_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps({key: value for key, value in summary.items() if key != "top_candidates"}, indent=2))
+    return 0
+
+
+def _collage_entries(input_root: Path, image_name: str) -> dict[str, list[Path]]:
+    grouped: dict[str, list[Path]] = {}
+    for image_path in sorted(input_root.rglob(image_name)):
+        if not image_path.is_file():
+            continue
+        date = _capture_date(image_path.parent)
+        if date is None:
+            continue
+        grouped.setdefault(date, []).append(image_path)
+    return grouped
+
+
+def _fit_tile(image: np.ndarray, tile_width: int, tile_height: int) -> np.ndarray:
+    height, width = image.shape[:2]
+    scale = min(tile_width / width, tile_height / height)
+    resized_width = max(1, int(round(width * scale)))
+    resized_height = max(1, int(round(height * scale)))
+    resized = cv2.resize(image, (resized_width, resized_height), interpolation=cv2.INTER_AREA)
+    tile = np.full((tile_height, tile_width, 3), COLLAGE_BACKGROUND, np.uint8)
+    y = (tile_height - resized_height) // 2
+    x = (tile_width - resized_width) // 2
+    tile[y : y + resized_height, x : x + resized_width] = resized
+    return tile
+
+
+def _write_collage(
+    output_path: Path,
+    image_paths: list[Path],
+    tile_width: int,
+    tile_height: int,
+    columns: int,
+    label_height: int = 34,
+    gutter: int = 12,
+) -> None:
+    if not image_paths:
+        raise ValueError("Cannot write a collage with no images.")
+    columns = max(1, int(columns))
+    rows = int(np.ceil(len(image_paths) / columns))
+    canvas_width = columns * tile_width + (columns + 1) * gutter
+    canvas_height = rows * (tile_height + label_height) + (rows + 1) * gutter
+    canvas = np.full((canvas_height, canvas_width, 3), COLLAGE_BACKGROUND, np.uint8)
+    for index, image_path in enumerate(image_paths):
+        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if image is None:
+            continue
+        row, col = divmod(index, columns)
+        x = gutter + col * (tile_width + gutter)
+        y = gutter + row * (tile_height + label_height + gutter)
+        canvas[y : y + tile_height, x : x + tile_width] = _fit_tile(image, tile_width, tile_height)
+        label = image_path.parent.name
+        cv2.putText(
+            canvas,
+            label,
+            (x, y + tile_height + 23),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            COLLAGE_TEXT,
+            1,
+            cv2.LINE_AA,
+        )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(output_path), canvas)
+
+
+def _collage(args: argparse.Namespace) -> int:
+    grouped = _collage_entries(args.input_root, args.image_name)
+    if not grouped:
+        raise SystemExit(f"No {args.image_name} images with RAW-style dates found under {args.input_root.resolve()}")
+    summary = {"input_root": str(args.input_root.resolve()), "image_name": args.image_name, "collages": []}
+    for date, image_paths in grouped.items():
+        output_path = args.output_dir / f"{date}_{Path(args.image_name).stem}_collage.png"
+        _write_collage(output_path, image_paths, args.tile_width, args.tile_height, args.columns)
+        summary["collages"].append(
+            {
+                "date": date,
+                "image_count": len(image_paths),
+                "output_path": str(output_path.resolve()),
+            }
+        )
+        print(f"Wrote {len(image_paths)} images for {date} -> {output_path}")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    (args.output_dir / "collage_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return 0
 
 
@@ -643,7 +782,17 @@ def build_parser() -> argparse.ArgumentParser:
     candidates.add_argument("--high-threshold", type=float, default=0.45)
     candidates.add_argument("--medium-threshold", type=float, default=0.18)
     candidates.add_argument("--low-threshold", type=float, default=0.05)
+    candidates.add_argument("--target-config", type=Path, default=DEFAULT_TARGET_PATH)
     candidates.set_defaults(handler=_detect_candidates)
+
+    collage = subparsers.add_parser("collage", help="Create dated collages from processed image products.")
+    collage.add_argument("input_root", type=Path, nargs="?", default=DEFAULT_DATA_ROOT / "outputs" / "runs")
+    collage.add_argument("--output-dir", type=Path, default=DEFAULT_DATA_ROOT / "outputs" / "collages")
+    collage.add_argument("--image-name", default="ndvi_false_color_crop.png")
+    collage.add_argument("--tile-width", type=int, default=320)
+    collage.add_argument("--tile-height", type=int, default=260)
+    collage.add_argument("--columns", type=int, default=4)
+    collage.set_defaults(handler=_collage)
 
     recalibrate = subparsers.add_parser(
         "recalibrate", help="Apply a scene correction to existing reflectance outputs."

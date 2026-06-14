@@ -8,6 +8,7 @@ python -m mira220 process
 python -m mira220 process-session
 python -m mira220 inspect
 python -m mira220 detect-candidates
+python -m mira220 collage
 ```
 
 The default model is `config/models/flat_patch_v1.yaml`. It processes Mira220
@@ -85,7 +86,9 @@ NDVI/candidate review products. Existing candidate outputs are reused; add
 
 Results are written to
 `C:\Users\jayal\droid-data\outputs\runs\<run-id>\<raw-name>\`.
-Incompatible RAW sizes are skipped and recorded in `run_summary.json`.
+Incompatible RAW sizes are skipped and recorded in `run_summary.json`. RAW
+frames with more than 5% sensor-max pixels are also skipped as saturated and
+recorded in the same summary.
 
 Every processed capture writes calibrated reflectance TIFFs, `ndvi.tiff`,
 `ndvi_gray.png`, `ndvi_false_color.png`, `ndvi_false_color_crop.png`,
@@ -173,6 +176,26 @@ python -m mira220 detect-candidates "<processed-output-dir>" `
   --texture-sensitivity 0.18 `
   --simplify-epsilon 8 `
   --geometry contour
+```
+
+## Create Dated Collages
+
+Create one contact sheet per capture date from processed output images:
+
+```powershell
+python -m mira220 collage "C:\Users\jayal\droid-data\outputs\runs\survey-001"
+```
+
+By default, this uses `ndvi_false_color_crop.png` from each processed capture
+folder and writes dated PNGs plus `collage_summary.json` under
+`C:\Users\jayal\droid-data\outputs\collages\`.
+
+Use candidate overlays instead:
+
+```powershell
+python -m mira220 collage "C:\Users\jayal\droid-data\outputs\runs\survey-001" `
+  --image-name candidate_overlay.png `
+  --output-dir "C:\Users\jayal\droid-data\outputs\collages\survey-001-candidates"
 ```
 
 See [docs/pipeline.md](docs/pipeline.md) for the correction equations and
