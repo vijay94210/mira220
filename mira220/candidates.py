@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+"""Find and describe interesting NDVI candidate regions.
+
+Candidate detection is a review aid. It does not decide final plant health by
+itself. Instead, it finds regions in processed NDVI images that look worth a
+human checking: broad vegetation regions, texture-heavy regions, and lower-NDVI
+areas. It also tries to ignore calibration targets and obvious image artifacts.
+"""
+
 import csv
 import json
 from dataclasses import asdict, dataclass
@@ -23,14 +31,19 @@ from .imaging import (
 ThresholdMode = Literal["manual", "otsu", "adaptive", "percentile"]
 GeometryMode = Literal["auto", "box", "contour"]
 
+# Overlay colors use OpenCV's BGR order because OpenCV writes images that way.
 CANDIDATE_COLORS_BGR = {
     "broad_ndvi_region": (0, 0, 255),
     "texture_region": (0, 165, 255),
 }
+
+# RGB hex colors are stored in summaries for people or browser-based tools.
 CANDIDATE_COLORS_RGB = {
     "broad_ndvi_region": "#FF0000",
     "texture_region": "#FFA500",
 }
+
+# These class names explain what kind of NDVI range a candidate came from.
 NDVI_CLASS_LABELS = {
     "high_vegetation": "High vegetation",
     "medium_vegetation": "Medium vegetation",
@@ -43,6 +56,9 @@ NDVI_CLASS_COLORS_BGR = {
     "low_vegetation": (60, 145, 215),
     "non_vegetation_artifact": (180, 80, 180),
 }
+
+# The ordered class list matters because masks are made exclusive in this order:
+# high vegetation gets first claim, then medium, then low, then non-vegetation.
 NDVI_CLASSES = (
     "high_vegetation",
     "medium_vegetation",
@@ -50,6 +66,7 @@ NDVI_CLASSES = (
     "non_vegetation_artifact",
 )
 
+# CSV field order is fixed so spreadsheets open candidate tables consistently.
 CSV_FIELDS = (
     "id",
     "candidate_type",
@@ -83,6 +100,8 @@ CSV_FIELDS = (
 
 @dataclass(frozen=True)
 class CandidateConfig:
+    # Tunable settings for candidate detection. These defaults are chosen for
+    # Mira220 NDVI review images but can be overridden from the CLI.
     top_n: int = 25
     threshold_mode: ThresholdMode = "percentile"
     manual_threshold: float | None = None
@@ -110,6 +129,8 @@ class CandidateConfig:
 
 @dataclass(frozen=True)
 class NdviSource:
+    # Bundle all input data needed by candidate detection: the NDVI values, the
+    # preview image used for overlays, and crop/source metadata.
     input_path: Path
     ndvi_path: Path | None
     ndvi: np.ndarray
@@ -122,11 +143,14 @@ class NdviSource:
 
 @dataclass(frozen=True)
 class TargetExclusion:
+    # Mask is the pixels to ignore, usually the calibration target. Metadata is
+    # written to JSON so a reviewer knows whether exclusion succeeded.
     mask: np.ndarray | None
     metadata: dict[str, Any]
 
 
 def _read_ndvi_tiff(path: Path) -> np.ndarray:
+    # Candidate detection expects a single-channel floating NDVI TIFF.
     ndvi = tifffile.imread(path)
     if ndvi.ndim != 2:
         raise ValueError(f"{path} must be a two-dimensional NDVI TIFF.")
@@ -134,6 +158,8 @@ def _read_ndvi_tiff(path: Path) -> np.ndarray:
 
 
 def _filled_ndvi(ndvi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    # Many image operations do not like NaN values. This returns a filled copy
+    # plus a mask showing which pixels were originally valid.
     values = np.asarray(ndvi, np.float32)
     finite = np.isfinite(values)
     if not finite.any():
@@ -148,6 +174,8 @@ def robust_normalize(
     low_percentile: float = 1.0,
     high_percentile: float = 99.0,
 ) -> np.ndarray:
+    # Robust normalization ignores extreme low/high percentiles so one odd pixel
+    # does not control the whole display or threshold scale.
     filled, finite = _filled_ndvi(ndvi)
     low, high = np.percentile(filled[finite], [low_percentile, high_percentile])
     if high <= low:
@@ -158,12 +186,14 @@ def robust_normalize(
 
 
 def _default_background(ndvi: np.ndarray) -> np.ndarray:
+    # If no preview PNG exists, create a false-color background from NDVI itself.
     filled, finite = _filled_ndvi(ndvi)
     filled[~finite] = float(np.nanmedian(filled[finite]))
     return cv2.cvtColor(ndvi_false_color(filled, -0.2, 0.7), cv2.COLOR_RGB2BGR)
 
 
 def _read_background(path: Path, shape: tuple[int, int]) -> np.ndarray | None:
+    # Only use a background image if it exists and matches the expected shape.
     image = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if image is None or image.shape[:2] != shape:
         return None
@@ -171,6 +201,8 @@ def _read_background(path: Path, shape: tuple[int, int]) -> np.ndarray | None:
 
 
 def _crop_or_full(image: np.ndarray, crop: bool) -> tuple[np.ndarray, tuple[int, int, int, int] | None]:
+    # Crop to the central valid region when possible. If the image is too small,
+    # fall back to the full image.
     if not crop:
         return np.asarray(image).copy(), None
     try:
@@ -180,6 +212,8 @@ def _crop_or_full(image: np.ndarray, crop: bool) -> tuple[np.ndarray, tuple[int,
 
 
 def _load_png_source(path: Path, crop: bool) -> NdviSource:
+    # A PNG can be used directly for visual review. If an adjacent ndvi.tiff is
+    # available, use that real NDVI data instead of guessing from image brightness.
     image = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError(f"Could not read image {path}.")
@@ -193,11 +227,13 @@ def _load_png_source(path: Path, crop: bool) -> NdviSource:
         if physical.shape == image.shape[:2]:
             return NdviSource(path, adjacent_ndvi, physical, image, True, None, physical.shape, image)
     source_bgr, margins = _crop_or_full(image, crop)
+    # Without a physical NDVI TIFF, use grayscale as a fallback signal.
     gray = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
     return NdviSource(path, None, gray, source_bgr, False, margins, image.shape[:2], source_bgr)
 
 
 def load_ndvi_source(path: Path, crop: bool = True) -> NdviSource:
+    # Accept either a processed output folder, an NDVI TIFF, or a preview image.
     path = Path(path)
     if path.is_dir():
         ndvi_path = path / "ndvi.tiff"
@@ -207,8 +243,10 @@ def load_ndvi_source(path: Path, crop: bool = True) -> NdviSource:
         ndvi, margins = _crop_or_full(full_ndvi, crop)
         background = None
         if crop:
+            # Prefer the already-cropped false-color preview if it matches.
             background = _read_background(path / "ndvi_false_color_crop.png", ndvi.shape)
         if background is None:
+            # Otherwise crop the full false-color preview.
             full_background = _read_background(path / "ndvi_false_color.png", full_ndvi.shape)
             if full_background is not None:
                 background, _ = _crop_or_full(full_background, crop)
@@ -227,15 +265,19 @@ def load_ndvi_source(path: Path, crop: bool = True) -> NdviSource:
 
 
 def _odd_size(value: int, minimum: int = 3) -> int:
+    # OpenCV filters often require odd kernel sizes.
     value = max(minimum, int(value))
     return value if value % 2 else value + 1
 
 
 def _kernel(size: int) -> np.ndarray:
+    # Elliptical kernels smooth shapes without making corners too square.
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_odd_size(size), _odd_size(size)))
 
 
 def _threshold_mask(normalized: np.ndarray, config: CandidateConfig) -> np.ndarray:
+    # Build a basic binary mask from normalized image values. Several threshold
+    # modes are supported for experimentation.
     image_u8 = np.round(np.clip(normalized, 0, 1) * 255).astype(np.uint8)
     if config.threshold_mode == "manual":
         threshold = 0.5 if config.manual_threshold is None else float(config.manual_threshold)
@@ -254,6 +296,7 @@ def _threshold_mask(normalized: np.ndarray, config: CandidateConfig) -> np.ndarr
 
 
 def _false_color_class_masks(image_bgr: np.ndarray, config: CandidateConfig) -> dict[str, np.ndarray]:
+    # If only a false-color PNG is available, estimate NDVI classes from color.
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
     hue = hsv[..., 0].astype(np.float32)
     saturation = hsv[..., 1].astype(np.float32) / 255.0
@@ -273,6 +316,8 @@ def _false_color_class_masks(image_bgr: np.ndarray, config: CandidateConfig) -> 
 
 
 def _fill_small_holes(mask: np.ndarray, max_hole_area: int) -> np.ndarray:
+    # Fill small empty islands inside a region, but do not fill holes connected
+    # to the image edge.
     if max_hole_area <= 0 or not np.any(mask):
         return mask
     inverse = (mask == 0).astype(np.uint8)
@@ -288,6 +333,8 @@ def _fill_small_holes(mask: np.ndarray, max_hole_area: int) -> np.ndarray:
 
 
 def _clean_and_sieve(mask: np.ndarray, config: CandidateConfig) -> np.ndarray:
+    # Morphological opening removes tiny specks. Closing bridges small gaps.
+    # The connected-component step keeps only regions large enough to review.
     clean = (mask > 0).astype(np.uint8) * 255
     if config.morph_open > 0:
         clean = cv2.morphologyEx(clean, cv2.MORPH_OPEN, _kernel(config.morph_open))
@@ -303,6 +350,8 @@ def _clean_and_sieve(mask: np.ndarray, config: CandidateConfig) -> np.ndarray:
 
 
 def _clean_class_mask(class_name: str, mask: np.ndarray, config: CandidateConfig) -> np.ndarray:
+    # Vegetation classes use a smaller close kernel so nearby plant regions do
+    # not get merged too aggressively.
     if class_name not in {"high_vegetation", "medium_vegetation"}:
         return _clean_and_sieve(mask, config)
     class_config = CandidateConfig(
@@ -318,6 +367,8 @@ def build_class_masks(
     source_or_ndvi: NdviSource | np.ndarray,
     config: CandidateConfig,
 ) -> dict[str, np.ndarray]:
+    # Create one cleaned mask per NDVI class. Masks are then made exclusive so a
+    # pixel belongs to only one class.
     if isinstance(source_or_ndvi, NdviSource) and not source_or_ndvi.physical_ndvi and source_or_ndvi.source_bgr is not None:
         raw_masks = _false_color_class_masks(source_or_ndvi.source_bgr, config)
     else:
@@ -325,11 +376,13 @@ def build_class_masks(
         filled, finite = _filled_ndvi(ndvi)
         smooth = cv2.GaussianBlur(filled, (0, 0), 2.0)
         if isinstance(source_or_ndvi, NdviSource) and source_or_ndvi.physical_ndvi:
+            # Physical NDVI values can use meaningful thresholds.
             high = finite & (smooth >= config.high_threshold)
             medium = finite & (smooth >= config.medium_threshold) & (smooth < config.high_threshold)
             low = finite & (smooth >= config.low_threshold) & (smooth < config.medium_threshold)
             non = finite & (smooth < config.low_threshold)
         else:
+            # Non-physical image sources use normalized brightness thresholds.
             normalized = robust_normalize(filled, config.percentile_low, config.percentile_high)
             base = _threshold_mask(normalized, config)
             high = finite & base & (normalized >= 0.68)
@@ -353,6 +406,8 @@ def build_class_masks(
 
 
 def _local_texture(normalized: np.ndarray, config: CandidateConfig) -> np.ndarray:
+    # Texture score combines local standard deviation and edge strength. It helps
+    # find regions that may not be extreme in average NDVI but still look unusual.
     size = _odd_size(config.texture_window)
     mean = cv2.blur(normalized, (size, size))
     mean_sq = cv2.blur(normalized * normalized, (size, size))
@@ -363,6 +418,8 @@ def _local_texture(normalized: np.ndarray, config: CandidateConfig) -> np.ndarra
 
 
 def _contrast_score(normalized: np.ndarray, component: np.ndarray) -> float:
+    # Compare the inside of a candidate to a ring around it. Strong contrast
+    # means the region stands out from its neighbors.
     if not np.any(component):
         return 0.0
     kernel = _kernel(17)
@@ -376,6 +433,7 @@ def _contrast_score(normalized: np.ndarray, component: np.ndarray) -> float:
 
 
 def _candidate_geometry(contour: np.ndarray, geometry: GeometryMode, config: CandidateConfig) -> tuple[str, list[list[int]]]:
+    # Convert a contour into either a simple box or a simplified polygon.
     x, y, w, h = cv2.boundingRect(contour)
     area = max(1.0, cv2.contourArea(contour))
     extent = area / max(1, w * h)
@@ -396,6 +454,8 @@ def _component_stats(
     component: np.ndarray,
     contour: np.ndarray,
 ) -> dict[str, float]:
+    # Calculate measurements that are written to CSV/JSON and used for filtering
+    # and scoring.
     x, y, w, h = cv2.boundingRect(contour)
     values = ndvi[component]
     if values.size == 0:
@@ -434,6 +494,7 @@ def _region_candidates(
     masks: dict[str, np.ndarray],
     config: CandidateConfig,
 ) -> list[dict[str, Any]]:
+    # Broad region candidates come directly from each cleaned NDVI class mask.
     features: list[dict[str, Any]] = []
     for ndvi_class, mask in masks.items():
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -446,10 +507,12 @@ def _region_candidates(
             stats = _component_stats(ndvi, normalized, texture, component, contour)
             height, width = mask.shape
             if stats["area_pixels"] > 0.90 * height * width:
+                # A nearly full-frame region is usually a thresholding failure.
                 continue
             if _is_artifact_candidate(stats, mask.shape, ndvi_class):
                 continue
             if stats["contrast_score"] < config.min_contrast and stats["area_pixels"] < config.large_region_area:
+                # Small low-contrast regions are not useful enough to report.
                 continue
             geometry_type, points = _candidate_geometry(contour, config.geometry, config)
             score = stats["area_pixels"] * (1.0 + stats["contrast_score"] + 0.2 * stats["texture_score"])
@@ -474,6 +537,8 @@ def _region_candidates(
 
 
 def _rasterize_candidates(shape: tuple[int, int], candidates: list[dict[str, Any]]) -> np.ndarray:
+    # Turn candidate polygons back into a mask. This helps avoid duplicate
+    # texture candidates on top of broad candidates.
     mask = np.zeros(shape, np.uint8)
     for candidate in candidates:
         points = np.array(candidate.get("points", []), np.int32)
@@ -491,6 +556,8 @@ def _texture_candidates(
     broad_candidates: list[dict[str, Any]],
     config: CandidateConfig,
 ) -> list[dict[str, Any]]:
+    # Texture candidates look for rough or detailed areas inside medium/low
+    # vegetation zones that were not already covered by broad candidates.
     candidate_zone = (masks["medium_vegetation"] > 0) | (masks["low_vegetation"] > 0)
     occupied = _rasterize_candidates(normalized.shape, broad_candidates) > 0
     texture_mask = (texture >= config.texture_sensitivity) & candidate_zone
@@ -506,6 +573,7 @@ def _texture_candidates(
         component = component_mask > 0
         overlap = np.count_nonzero(component & occupied) / max(1, np.count_nonzero(component))
         if overlap > 0.35:
+            # Skip texture regions that mostly duplicate an existing candidate.
             continue
         stats = _component_stats(ndvi, normalized, texture, component, contour)
         if _is_artifact_candidate(stats, clean.shape, "medium_vegetation"):
@@ -530,6 +598,7 @@ def _texture_candidates(
 
 
 def _integer_bbox_stats(stats: dict[str, float]) -> dict[str, float | int]:
+    # Bounding box values are easier to read as integers; scores stay floats.
     output: dict[str, float | int] = {}
     for key, value in stats.items():
         if key in {"bbox_x", "bbox_y", "bbox_width", "bbox_height", "area_pixels"}:
@@ -540,6 +609,8 @@ def _integer_bbox_stats(stats: dict[str, float]) -> dict[str, float | int]:
 
 
 def _crop_mask_to_source(mask: np.ndarray, source: NdviSource) -> np.ndarray:
+    # Target masks are built in full-image coordinates. Candidate detection may
+    # be running on a cropped NDVI image, so crop or resize the mask to match.
     if source.crop_margins is None:
         if mask.shape != source.ndvi.shape:
             return cv2.resize(mask, (source.ndvi.shape[1], source.ndvi.shape[0]), interpolation=cv2.INTER_NEAREST)
@@ -553,6 +624,7 @@ def _crop_mask_to_source(mask: np.ndarray, source: NdviSource) -> np.ndarray:
 
 
 def _candidate_overlap_fraction(candidate: dict[str, Any], mask: np.ndarray) -> float:
+    # Measure how much of a candidate polygon overlaps an exclusion mask.
     candidate_mask = _rasterize_candidates(mask.shape, [candidate]) > 0
     area = int(np.count_nonzero(candidate_mask))
     if area == 0:
@@ -561,6 +633,8 @@ def _candidate_overlap_fraction(candidate: dict[str, Any], mask: np.ndarray) -> 
 
 
 def _candidate_exclusion_bbox_fraction(candidate: dict[str, Any], mask: np.ndarray) -> float:
+    # Also check the bounding box, because some candidate geometries may be
+    # simplified and miss part of the excluded region.
     x = int(candidate.get("bbox_x", 0))
     y = int(candidate.get("bbox_y", 0))
     w = int(candidate.get("bbox_width", 0))
@@ -579,6 +653,9 @@ def _apply_exclusion_mask(
     masks: dict[str, np.ndarray],
     exclusion_mask: np.ndarray | None,
 ) -> dict[str, np.ndarray]:
+    # Remove the calibration target area from class masks before candidates are
+    # found. A slightly wider vertical band is removed for some non-high classes
+    # because target boards can create nearby artifacts.
     if exclusion_mask is None:
         return masks
     keep = exclusion_mask == 0
@@ -604,6 +681,8 @@ def _filter_excluded_candidates(
     exclusion_mask: np.ndarray | None,
     overlap_threshold: float = 0.25,
 ) -> list[dict[str, Any]]:
+    # Final safety pass: drop candidates that still overlap the excluded target
+    # area too much.
     if exclusion_mask is None:
         return candidates
     return [
@@ -615,6 +694,8 @@ def _filter_excluded_candidates(
 
 
 def _is_artifact_candidate(stats: dict[str, float], shape: tuple[int, int], ndvi_class: str) -> bool:
+    # Heuristic filters for shapes that are likely borders, strips, or boards
+    # rather than useful plant regions.
     height, width = shape
     x = int(round(stats["bbox_x"]))
     y = int(round(stats["bbox_y"]))
@@ -650,6 +731,9 @@ def target_exclusion_from_source(
     target: dict[str, Any] | None,
     padding: int = 24,
 ) -> TargetExclusion:
+    # Try to build a mask around the calibration marker and patch board. If
+    # anything is missing or detection fails, return metadata explaining why and
+    # let candidate detection continue without exclusion.
     metadata: dict[str, Any] = {
         "enabled": target is not None,
         "detected": False,
@@ -675,13 +759,17 @@ def target_exclusion_from_source(
         return TargetExclusion(None, metadata)
 
     full_mask = np.zeros(rgn.shape[:2], np.uint8)
+    # Mark the ArUco marker and every target patch.
     cv2.fillConvexPoly(full_mask, np.round(marker).astype(np.int32), 255)
     for polygon in polygons:
         cv2.fillConvexPoly(full_mask, np.round(polygon).astype(np.int32), 255)
     all_points = np.vstack([marker, *polygons])
     hull = cv2.convexHull(np.round(all_points).astype(np.int32))
+    # Fill the convex hull around all target pieces so gaps between patches are
+    # also excluded.
     cv2.fillConvexPoly(full_mask, hull, 255)
     if padding > 0:
+        # Expand the mask a little to catch shadows and border artifacts.
         full_mask = cv2.dilate(full_mask, _kernel(padding))
     mask = _crop_mask_to_source(full_mask, source)
     metadata.update(
@@ -700,6 +788,12 @@ def detect_candidates(
     config: CandidateConfig | None = None,
     exclusion_mask: np.ndarray | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, np.ndarray]]:
+    # High-level candidate detection pipeline:
+    # 1. Normalize NDVI for thresholding and texture.
+    # 2. Build class masks.
+    # 3. Remove target-board pixels if an exclusion mask exists.
+    # 4. Find broad and texture candidates.
+    # 5. Sort by score and keep the top N.
     config = config or CandidateConfig()
     source = source_or_ndvi if isinstance(source_or_ndvi, NdviSource) else None
     ndvi = source.ndvi if source is not None else np.asarray(source_or_ndvi, np.float32)
@@ -712,11 +806,14 @@ def detect_candidates(
     features = _filter_excluded_candidates(features, exclusion_mask)
     features.sort(key=lambda item: item["total_score"], reverse=True)
     for index, feature in enumerate(features[: config.top_n], start=1):
+        # Candidate IDs are assigned after sorting so ID 1 is the strongest
+        # candidate according to the score.
         feature["id"] = index
     return features[: config.top_n], masks
 
 
 def write_candidates_csv(path: Path, candidates: list[dict[str, Any]]) -> None:
+    # Write a spreadsheet-friendly table of all candidate measurements.
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
@@ -728,6 +825,8 @@ def write_candidates_csv(path: Path, candidates: list[dict[str, Any]]) -> None:
 
 
 def write_candidate_mask(path: Path, shape: tuple[int, int], candidates: list[dict[str, Any]]) -> None:
+    # Write an ID mask: pixel value 1 belongs to candidate 1, value 2 belongs to
+    # candidate 2, and so on. Zero means no candidate.
     path.parent.mkdir(parents=True, exist_ok=True)
     mask = np.zeros(shape, np.uint16)
     for candidate in candidates:
@@ -745,6 +844,8 @@ def write_candidate_mask(path: Path, shape: tuple[int, int], candidates: list[di
 
 
 def _draw_points(overlay: np.ndarray, candidate: dict[str, Any], thickness: int) -> None:
+    # Draw a candidate outline with a black halo so it is visible on bright and
+    # dark backgrounds.
     points = candidate.get("points", [])
     if len(points) < 2:
         return
@@ -759,6 +860,7 @@ def _draw_points(overlay: np.ndarray, candidate: dict[str, Any], thickness: int)
 
 
 def _draw_candidate_label(overlay: np.ndarray, candidate: dict[str, Any]) -> None:
+    # Draw the candidate ID near its centroid.
     label = str(candidate.get("id", ""))
     if not label:
         return
@@ -785,10 +887,13 @@ def _put_panel_text(
     color: tuple[int, int, int] = (30, 30, 30),
     thickness: int = 1,
 ) -> None:
+    # Small wrapper so legend text uses one consistent font style.
     cv2.putText(panel, text, origin, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
 
 
 def _draw_wrapped_text(panel: np.ndarray, text: str, x: int, y: int, max_width: int) -> int:
+    # OpenCV does not wrap text automatically, so split labels into lines that
+    # fit inside the legend panel.
     words = text.split()
     line = ""
     for word in words:
@@ -808,6 +913,7 @@ def _draw_wrapped_text(panel: np.ndarray, text: str, x: int, y: int, max_width: 
 
 
 def _draw_ndvi_legend(panel: np.ndarray, x: int, y: int, height: int = 210) -> int:
+    # Draw the false-color scale that explains how NDVI values map to colors.
     _put_panel_text(panel, "NDVI false color", (x, y), 0.62, thickness=2)
     y += 18
     height = max(30, min(height, panel.shape[0] - y - 12))
@@ -824,6 +930,7 @@ def _draw_ndvi_legend(panel: np.ndarray, x: int, y: int, height: int = 210) -> i
 
 
 def _draw_class_legend(panel: np.ndarray, candidates: list[dict[str, Any]], x: int, y: int, width: int) -> int:
+    # Draw class meanings and the list of candidate IDs included in the overlay.
     _put_panel_text(panel, "Candidate classes", (x, y), 0.62, thickness=2)
     y += 24
     for class_name in NDVI_CLASSES:
@@ -848,6 +955,7 @@ def _draw_class_legend(panel: np.ndarray, candidates: list[dict[str, Any]], x: i
 
 
 def _append_legend_panel(overlay: np.ndarray, candidates: list[dict[str, Any]]) -> np.ndarray:
+    # Add a right-side explanation panel to the overlay image.
     panel_width = 320
     gap = 12
     height = overlay.shape[0]
@@ -865,6 +973,7 @@ def write_candidate_overlay(
     candidates: list[dict[str, Any]],
     config: CandidateConfig,
 ) -> None:
+    # Draw all candidate outlines and labels on top of the NDVI preview.
     path.parent.mkdir(parents=True, exist_ok=True)
     overlay = np.asarray(background).copy()
     thickness = max(1, int(config.box_thickness))
@@ -883,6 +992,8 @@ def summarize_candidates(
     candidates: list[dict[str, Any]],
     target_exclusion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    # Build the JSON summary that records inputs, parameters, counts, and the
+    # top candidate rows.
     counts_by_type: dict[str, int] = {}
     counts_by_class: dict[str, int] = {}
     for candidate in candidates:

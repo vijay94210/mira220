@@ -1,11 +1,16 @@
+# Optional scene-specific model.
+# It starts with flat_patch_v1, then applies an extra Red/IR correction trained
+# from an aligned June 4 gold-camera scene.
 name: scene_reference_v1
 description: Flat-patch correction followed by channel-level calibration against the aligned June 4 gold scene.
 preprocessing:
+  # Must match the preprocessing assumptions from the base model.
   irc_cut: 0.0
   awb: false
   ccm: false
   sensor_bit_depth: 12
 provenance:
+  # Training information for the scene-specific correction.
   base_model: config/models/flat_patch_v1.yaml
   training_mira_run: results/survey-001
   training_gold_tiff: data/gold/2026_0604_194919_003.tif
@@ -26,10 +31,12 @@ correction:
     features: [raw_ir, raw_ir_squared, constant]
     coefficients: [0.650101363658905, 0.027597997337579727, 0.15592704713344574]
 scene_correction:
+  # Second-stage equation features and coefficients for Red and IR.
   features: [red, ir, red_squared, ir_squared, red_ir, constant]
   red_coefficients: [-0.68176794, 1.89970319, -1.06311970, -3.34734468, 4.25815120, -0.10796675]
   ir_coefficients: [-0.06126671, 2.08372739, 0.32274787, 0.21434925, -1.48613163, -0.21881987]
 validation:
+  # Leave-one-capture-out ranges from training validation.
   block_size: 16
   leave_one_capture_out:
     pearson_correlation_range: [0.8809, 0.9279]

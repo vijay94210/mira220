@@ -1,5 +1,8 @@
 from pathlib import Path
 
+# Tests for RAW processing, product writing, candidate generation, saturation
+# skipping, and dated collage creation.
+
 import cv2
 import numpy as np
 import pytest

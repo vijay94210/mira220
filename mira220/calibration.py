@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""Fit and inspect the flat-patch calibration model.
+
+Calibration teaches the pipeline how to turn raw Mira220 camera channels into
+more trustworthy Red, Green, and IR reflectance values. It uses a calibration
+target with known flat patches and a trusted gold-camera image.
+"""
+
 from pathlib import Path
 
 import cv2
@@ -28,18 +35,24 @@ def fit_flat_patch_model(
     target: dict,
     keep_intermediates: bool = False,
 ) -> dict:
+    # Convert the Mira RAW into visible RGB and IR arrays, then normalize the
+    # sensor values into 0.0..1.0.
     raw_rgb, raw_ir = run_openrgbir(
         mira_raw, output_dir, openrgbir_repo, isp_config, keep_intermediates=keep_intermediates
     )
     mira_rgb = normalize_sensor(raw_rgb)
     mira_ir = normalize_sensor(raw_ir)
+    # Gold TIFFs are expected to be 16-bit calibrated reflectance images.
     gold = tifffile.imread(gold_tiff).astype(np.float32) / 65535.0
+    # Detect the same ArUco marker in both images so patch locations can be
+    # measured in matching places.
     marker_id = int(target["marker_id"])
     dictionary = target["dictionary"]
     mira_marker = detect_marker(mira_rgb, marker_id, dictionary)
     gold_marker = detect_marker(gold, marker_id, dictionary)
     mira_polygons = patch_polygons(mira_marker, target)
     gold_polygons = patch_polygons(gold_marker, target)
+    # Measure the median raw Mira value inside each target patch.
     mira_values = np.array(
         [
             [
@@ -51,8 +64,12 @@ def fit_flat_patch_model(
         ],
         dtype=np.float32,
     )
+    # Measure the trusted gold reflectance for each patch, then average R/G/IR
+    # because these are flat-spectrum patches that should be nearly neutral.
     gold_values = np.array([polygon_median(gold, polygon) for polygon in gold_polygons], dtype=np.float32)
     shared_targets = gold_values.mean(axis=1)
+    # Build small equation tables for least-squares fitting. Each row is one
+    # patch; each column is a feature used to predict a corrected channel value.
     red_design = np.column_stack(
         [mira_values[:, 0], mira_values[:, 2], np.square(mira_values[:, 2]), np.ones(4)]
     )
@@ -60,6 +77,8 @@ def fit_flat_patch_model(
         [mira_values[:, 1], mira_values[:, 2], np.square(mira_values[:, 2]), np.ones(4)]
     )
     ir_design = np.column_stack([mira_values[:, 2], np.square(mira_values[:, 2]), np.ones(4)])
+    # Store the fitted coefficients and enough provenance to understand how the
+    # model was made later.
     model = {
         "name": "flat_patch_v1",
         "description": "Post-demosaic quadratic R/G/IR correction anchored to flat-spectrum patches.",
@@ -94,6 +113,8 @@ def fit_flat_patch_model(
             },
         },
     }
+    # Validate the model by applying it back to the Mira calibration image and
+    # checking the corrected patch NDVI values.
     red, green, ir = apply_model(mira_rgb, mira_ir, model)
     patch_results = []
     for patch, polygon in zip(target["patches"], mira_polygons):
@@ -110,6 +131,8 @@ def fit_flat_patch_model(
             }
         )
     model["validation"] = {"patch_results": patch_results, "max_abs_patch_ndvi": max(abs(x["ndvi"]) for x in patch_results)}
+    # Write small visual evidence files. These help a human confirm that the
+    # target was found and the preview looks plausible.
     output_dir.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output_dir / "patches_annotated.png"), draw_patch_overlay(gold, gold_marker, gold_polygons, target))
     write_rgb_preview(output_dir / "gold_rgn_preview.png", gold)
@@ -120,6 +143,8 @@ def fit_flat_patch_model(
 
 
 def inspect_products(run_dir: Path, target: dict, model: dict) -> dict:
+    # Inspect an already processed capture by measuring the target patches in
+    # its reflectance TIFFs.
     red = tifffile.imread(run_dir / "red_reflectance.tiff")
     green = tifffile.imread(run_dir / "green_reflectance.tiff")
     ir = tifffile.imread(run_dir / "ir_reflectance.tiff")
@@ -128,6 +153,8 @@ def inspect_products(run_dir: Path, target: dict, model: dict) -> dict:
     polygons = patch_polygons(marker, target)
     patches = []
     for patch, polygon in zip(target["patches"], polygons):
+        # For each patch, report channel medians and NDVI. These values show how
+        # close the processed output is to the expected neutral target behavior.
         rv = float(polygon_median(red, polygon))
         gv = float(polygon_median(green, polygon))
         iv = float(polygon_median(ir, polygon))

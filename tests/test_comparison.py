@@ -1,5 +1,8 @@
 from pathlib import Path
 
+# Tests for Mira-to-gold comparison and pair ranking. These checks cover marker
+# alignment, regression metrics, output discovery, and partial batch failures.
+
 import cv2
 import numpy as np
 import pytest

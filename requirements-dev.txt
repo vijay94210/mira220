@@ -1,3 +1,4 @@
+# Development/test dependencies.
+# This includes runtime requirements first, then adds pytest.
 -r requirements.txt
 pytest>=9.0
-

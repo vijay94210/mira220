@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+# Tests for NDVI candidate detection and candidate output files. These checks
+# cover classification, artifact rejection, target exclusion, CSVs, masks, and
+# overlays.
+
 import csv
 import json
 from pathlib import Path

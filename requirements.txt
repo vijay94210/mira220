@@ -1,3 +1,5 @@
+# Runtime dependencies for the Mira220 processing CLI.
+# opencv-contrib-python is needed for ArUco marker detection.
 numpy>=2.0
 opencv-contrib-python>=4.10
 PyYAML>=6.0

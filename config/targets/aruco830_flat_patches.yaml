@@ -1,9 +1,12 @@
+# Geometry for the physical ArUco 830 calibration target.
+# Rectangles are written in marker-relative coordinates, not image pixels.
 marker_id: 830
 dictionary: DICT_4X4_1000
+# Measure slightly inside each patch so borders and shadows are avoided.
 inset_fraction: 0.15
 patches:
+  # Patch order is important: top row first, then bottom row.
   - {name: P1, position: top-left, rect: [-1.85, -0.25, -1.08, 0.52]}
   - {name: P2, position: top-right, rect: [-1.08, -0.25, -0.30, 0.52]}
   - {name: P3, position: bottom-left, rect: [-1.85, 0.52, -1.08, 1.28]}
   - {name: P4, position: bottom-right, rect: [-1.08, 0.52, -0.30, 1.28]}
-

@@ -1,5 +1,8 @@
 from pathlib import Path
 
+# Tests for session-level target adjustment. These checks cover patch
+# aggregation, affine fitting, output writing, clipping summaries, and skip cases.
+
 import numpy as np
 import pytest
 import tifffile
